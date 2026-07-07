@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "riskguard"
+version = "1.0.0"
+description = "券商无关的开源交易风控层:仓位上限、总亏损熔断、动态仓位、审计追溯与实时监控守护。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "RiskGuard contributors" }]
+keywords = [
+    "trading",
+    "risk-management",
+    "quant",
+    "position-sizing",
+    "kelly-criterion",
+    "circuit-breaker",
+    "algorithmic-trading",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+# 核心零依赖:纯标准库。这是本库的立身之本——补上量化五层里免费开源的最后一块。
+dependencies = []
+
+[project.optional-dependencies]
+alpaca = ["alpaca-py>=0.20"]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "mypy>=1.8",
+    "ruff>=0.3",
+]
+all = ["riskguard[alpaca,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/riskguard/riskguard"
+Documentation = "https://github.com/riskguard/riskguard#readme"
+Issues = "https://github.com/riskguard/riskguard/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/riskguard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
