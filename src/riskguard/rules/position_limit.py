@@ -19,20 +19,27 @@ class MaxPositionLimit(RiskRule):
 
     def evaluate(self, ctx: RuleContext) -> RuleResult:
         order, portfolio, config = ctx.order, ctx.portfolio, ctx.config
+        current, projected, increasing = project(order, portfolio)
+
+        # 减仓 / 平仓 / reduce_only 永远放行,且**不依赖 equity 是否有效**:
+        # 权益归零(爆仓)时,通过 submit() 手动平仓的 reduce_only 单也必须能过闸门。
+        if order.reduce_only or not increasing:
+            return self.approve(f"{order.symbol} reducing/flat — always allowed")
+
         equity = portfolio.equity
         if equity <= 0:
             return self.reject(
-                f"non-positive equity ({equity}); cannot size {order.symbol}",
+                f"non-positive equity ({equity}); cannot size a risk-increasing "
+                f"order on {order.symbol}",
                 equity=equity,
             )
 
         price = resolve_price(portfolio, order)
         cap_qty = (config.max_position_pct * equity) / price
-        current, projected, increasing = project(order, portfolio)
         projected_weight = abs(projected) * price / equity
 
-        # 减仓单,或成交后仍在上限内 → 放行
-        if not increasing or within(abs(projected), cap_qty):
+        # 成交后仍在上限内 → 放行
+        if within(abs(projected), cap_qty):
             return self.approve(
                 f"{order.symbol} projected weight {projected_weight:.2%} "
                 f"<= cap {config.max_position_pct:.2%}",

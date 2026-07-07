@@ -693,7 +693,15 @@ def test_no_auto_register_by_default():
 
 def test_engine_builds_default_rules_when_none_given():
     eng = RiskEngine(RiskConfig(), clock=_list_clock()[1])
-    assert len(eng.rules) == 4  # drawdown / position / quarantine / gross
+    # drawdown / position / quarantine / gross / net
+    names = {r.name for r in eng.rules}
+    assert names == {
+        "drawdown_circuit_breaker",
+        "max_position_limit",
+        "strategy_quarantine",
+        "gross_exposure_limit",
+        "net_exposure_limit",
+    }
 
 
 def test_default_rules_resize_oversized_position():

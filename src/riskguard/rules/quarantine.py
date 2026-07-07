@@ -30,16 +30,27 @@ class StrategyQuarantine(RiskRule):
                 age_days=age,
             )
 
+        current, projected, increasing = project(order, portfolio)
+
+        # 减仓 / reduce_only 永远放行,且不依赖 equity 是否有效。
+        if order.reduce_only or not increasing:
+            return self.approve(
+                f"quarantined strategy {order.strategy_id!r}: reducing/flat — allowed",
+                age_days=age,
+            )
+
         equity = portfolio.equity
         if equity <= 0:
-            return self.reject(f"non-positive equity ({equity})", equity=equity)
+            return self.reject(
+                f"non-positive equity ({equity}); cannot size a risk-increasing order",
+                equity=equity,
+            )
 
         price = resolve_price(portfolio, order)
         cap_qty = (config.quarantine_max_position_pct * equity) / price
-        current, projected, increasing = project(order, portfolio)
         projected_weight = abs(projected) * price / equity
 
-        if not increasing or within(abs(projected), cap_qty):
+        if within(abs(projected), cap_qty):
             return self.approve(
                 f"quarantined strategy {order.strategy_id!r}: weight "
                 f"{projected_weight:.2%} <= cap {config.quarantine_max_position_pct:.2%}",

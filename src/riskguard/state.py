@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
@@ -52,7 +53,15 @@ class RiskState:
 
     # ---- 不可变更新 ----
     def observe_equity(self, equity: float, now: datetime) -> "RiskState":
-        """观测一笔新的权益值,返回更新了 last_equity / 高点的新状态。"""
+        """观测一笔新的权益值,返回更新了 last_equity / 高点的新状态。
+
+        **坏读数防御**:NaN / ±inf 的权益(feed 抖动、除零、坏 tick)会被直接**忽略**,
+        返回原状态不变。绝不能让一个 NaN 污染 last_equity——那会让 drawdown 恒算成
+        NaN、回撤熔断从此永不触发(fail-open)。忽略坏读数后,熔断继续按最后一个有效
+        权益工作(fail-safe)。
+        """
+        if not math.isfinite(equity):
+            return self
         hwm = max(self.high_water_mark, equity)
         return replace(self, high_water_mark=hwm, last_equity=equity)
 

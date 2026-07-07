@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from .base import RiskRule, RuleContext
 from .drawdown import DrawdownCircuitBreaker
-from .exposure import GrossExposureLimit
+from .exposure import GrossExposureLimit, NetExposureLimit
 from .position_limit import MaxPositionLimit
 from .quarantine import StrategyQuarantine
 
@@ -25,6 +25,7 @@ def build_default_rules(config: "RiskConfig") -> list[RiskRule]:
         MaxPositionLimit(),
         StrategyQuarantine(),
         GrossExposureLimit(),
+        NetExposureLimit(),  # 仅当 max_net_exposure_pct 设值时生效,否则空操作
     ]
 
 
@@ -35,5 +36,6 @@ __all__ = [
     "MaxPositionLimit",
     "StrategyQuarantine",
     "GrossExposureLimit",
+    "NetExposureLimit",
     "build_default_rules",
 ]

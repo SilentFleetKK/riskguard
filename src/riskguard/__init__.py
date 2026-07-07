@@ -46,6 +46,7 @@ from .rules import (
     DrawdownCircuitBreaker,
     GrossExposureLimit,
     MaxPositionLimit,
+    NetExposureLimit,
     RiskRule,
     RuleContext,
     StrategyQuarantine,
@@ -59,7 +60,7 @@ from .sizing import (
 )
 from .state import RiskState
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     "__version__",
@@ -85,6 +86,7 @@ __all__ = [
     "MaxPositionLimit",
     "DrawdownCircuitBreaker",
     "GrossExposureLimit",
+    "NetExposureLimit",
     "StrategyQuarantine",
     "build_default_rules",
     # 仓位算法

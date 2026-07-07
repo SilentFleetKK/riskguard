@@ -161,6 +161,108 @@ def test_concurrent_ticks_liquidate_once_and_stay_flat():
     assert broker.get_positions() == {}  # 已平仓,且没有被反手开成空仓
 
 
+# ---------------------------------------------------------------------------
+# 第二轮审查:NaN/inf 权益不得让熔断永不触发(fail-open)
+# ---------------------------------------------------------------------------
+def test_non_finite_equity_is_ignored_by_state():
+    from riskguard import RiskState
+
+    s = RiskState.initial(100_000.0)
+    assert s.observe_equity(float("nan"), _now()).last_equity == 100_000.0
+    assert s.observe_equity(float("inf"), _now()).last_equity == 100_000.0
+
+
+def test_nan_equity_does_not_disable_circuit_breaker():
+    from riskguard import Account, Portfolio
+
+    broker = PaperBroker(cash=100_000, marks={"AAPL": 100.0})
+    engine = RiskEngine(
+        RiskConfig(max_drawdown_pct=0.15, max_position_pct=1.0), broker=broker
+    )
+    engine.update_equity(broker.get_portfolio())  # hwm = 100k
+    # 一次 NaN 权益读数(feed 抖动):必须被忽略,不污染 last_equity、不禁用熔断
+    engine.update_equity(Portfolio(Account(equity=float("nan"))))
+    assert not engine.breaker_tripped
+    assert engine.state.last_equity == 100_000.0
+    # 之后真实跌破红线 -> 熔断照常触发
+    broker._cash = 80_000
+    engine.update_equity(broker.get_portfolio())
+    assert engine.breaker_tripped
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查:equity<=0(爆仓)时 reduce_only 减仓单仍必须放行
+# ---------------------------------------------------------------------------
+def test_reduce_only_allowed_even_at_zero_equity():
+    from riskguard import Account, Portfolio, Position
+
+    engine = RiskEngine(RiskConfig())
+    pf = Portfolio(
+        Account(equity=0.0),
+        positions={"AAPL": Position("AAPL", 50, 100.0)},
+        marks={"AAPL": 100.0},
+    )
+    assert engine.check(Order("AAPL", Side.SELL, 10, reduce_only=True), pf).approved
+    # 但爆仓时放大敞口的新开仓仍被拒
+    assert engine.check(Order("AAPL", Side.BUY, 10), pf).rejected
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查:max_net_exposure_pct 不再是死配置
+# ---------------------------------------------------------------------------
+def test_net_exposure_limit_enforced_when_configured():
+    broker = PaperBroker(cash=100_000, marks={"AAPL": 100.0})
+    cfg = RiskConfig(
+        max_net_exposure_pct=0.20, max_gross_exposure_pct=10.0, max_position_pct=1.0
+    )
+    engine = RiskEngine(cfg, broker=broker)
+    # 买 300 @100 = 净敞口 30k = 30% > 20% 上限 -> 缩到 200 股(20k)
+    d = engine.check(Order("AAPL", Side.BUY, 300), broker.get_portfolio())
+    assert d.resized
+    assert d.order.quantity == pytest.approx(200.0)
+
+
+def test_net_exposure_disabled_is_noop_by_default():
+    from datetime import datetime, timezone
+
+    from riskguard import Account, Portfolio, RiskState
+    from riskguard.rules import NetExposureLimit, RuleContext
+
+    pf = Portfolio(Account(equity=100_000.0), marks={"AAPL": 100.0})
+    ctx = RuleContext(
+        Order("AAPL", Side.BUY, 100_000), pf, RiskConfig(),
+        RiskState.initial(100_000.0), datetime.now(timezone.utc),
+    )
+    res = NetExposureLimit().evaluate(ctx)
+    assert res.passed and res.action.value == "approve"
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查:审计写入失败不得中断风控裁决
+# ---------------------------------------------------------------------------
+def test_audit_failure_does_not_break_risk_decision():
+    from riskguard.audit.base import AuditSink
+
+    class BoomAudit(AuditSink):
+        name = "boom"
+
+        def record(self, event):
+            raise OSError("disk full")
+
+    errors = []
+    broker = PaperBroker(cash=100_000, marks={"AAPL": 100.0})
+    engine = RiskEngine(
+        RiskConfig(max_position_pct=0.10),
+        broker=broker,
+        audit=BoomAudit(),
+        on_audit_error=errors.append,
+    )
+    # 审计会抛异常,但裁决必须照常返回(缩单),错误转交回调
+    d = engine.check(Order("AAPL", Side.BUY, 1000), broker.get_portfolio())
+    assert d.resized
+    assert len(errors) == 1 and isinstance(errors[0], OSError)
+
+
 def _now():
     from datetime import datetime, timezone
 

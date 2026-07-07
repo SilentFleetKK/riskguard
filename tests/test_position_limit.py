@@ -390,11 +390,22 @@ def test_negative_equity_rejects():
     assert decision.decision is Decision.REJECT
 
 
-def test_non_positive_equity_rejects_even_reduce_only():
-    """权益非正时即便是 reduce_only 减仓单也在本规则处被拒(先于减仓判断)。"""
+def test_non_positive_equity_still_allows_reduce_only():
+    """权益归零(爆仓)时,reduce_only 减仓单**仍必须放行**——减仓永远放行铁律,
+    不因 equity<=0 而被拒(修复前会误拒)。"""
     eng = _engine()
     decision = eng.check(
         Order("AAPL", Side.SELL, 10, reduce_only=True),
+        _make_portfolio(equity=0.0, positions=_pos("AAPL", 50)),
+    )
+    assert decision.approved
+
+
+def test_non_positive_equity_rejects_increasing_order():
+    """但权益非正时,放大敞口的新开仓单仍应被拒(无法用无效权益给它定量)。"""
+    eng = _engine()
+    decision = eng.check(
+        Order("AAPL", Side.BUY, 10),
         _make_portfolio(equity=0.0, positions=_pos("AAPL", 50)),
     )
     assert decision.decision is Decision.REJECT

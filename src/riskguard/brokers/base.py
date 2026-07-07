@@ -43,7 +43,13 @@ class Broker(ABC):
 
     @abstractmethod
     def submit_order(self, order: Order) -> BrokerOrder:
-        """提交一笔订单,返回券商回执。"""
+        """提交一笔订单,返回券商回执。
+
+        **reduce_only 契约(实现方必须遵守)**:当 ``order.reduce_only`` 为真时,该单
+        只能使持仓朝零收敛,**绝不允许反向或超额开仓**;超出当前持仓的部分必须被夹到
+        平仓为止。风控规则正是依赖这条契约来"永远放行减仓单",由 broker 兜底 enforcement。
+        内置的 :class:`~riskguard.brokers.paper.PaperBroker` 已实现该夹取。
+        """
 
     @abstractmethod
     def cancel_order(self, broker_order_id: str) -> None:

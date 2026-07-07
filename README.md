@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Tests](https://img.shields.io/badge/tests-654%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-661%20passing-brightgreen.svg)
 ![Core deps](https://img.shields.io/badge/core%20deps-0-brightgreen.svg)
 ![PRs](https://img.shields.io/badge/PRs-welcome-orange.svg)
 
@@ -63,7 +63,7 @@
 | 🚫 单笔仓位闸 | `MaxPositionLimit` | 任一标的名义敞口 ≤ 权益的 `max_position_pct`(默认 10%)—— 别把身家压一注 |
 | 🧯 回撤熔断 | `DrawdownCircuitBreaker` | 回撤触及 `max_drawdown_pct`(默认 15%)即停新仓,**减仓永远放行** |
 | 🐣 新兵隔离区 | `StrategyQuarantine` | 新策略先用小钱蹲观察期(默认 90 天),活过了再加仓 |
-| ⚖️ 组合总敞口闸 | `GrossExposureLimit` | 一堆各自合规的小仓,也不许叠成过度杠杆的大敞口 |
+| ⚖️ 组合敞口闸 | `GrossExposureLimit` / `NetExposureLimit` | 总敞口管杠杆、净敞口管方向;一堆各自合规的小仓也不许叠成大风险 |
 | 🎲 动态下注 | `KellySizer` / `VolatilityTargetSizer` / `FixedFractionalSizer` | 下多大注让公式算,不让情绪算;无正期望时自动不下注 |
 | 🚨 实时哨兵 | `RiskMonitor` | 后台线程盯盘,触线自动踩刹车(撤单 + 平仓)——情绪失控时替你拉闸 |
 | 📿 防篡改案底 | `JsonlAuditSink` / `SqliteAuditSink` | 每次裁决/熔断/成交都留哈希链记录,可选 HMAC 防伪 |
@@ -201,7 +201,7 @@ with RiskMonitor(engine, broker, interval=5.0, auto_liquidate=True):
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 654 passed
+pytest            # 661 passed
 mypy src && ruff check src
 ```
 

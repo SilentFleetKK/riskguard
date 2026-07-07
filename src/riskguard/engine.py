@@ -59,6 +59,7 @@ class RiskEngine:
         state: Optional[RiskState] = None,
         raise_on_reject: bool = False,
         clock: Callable[[], datetime] = _utc_now,
+        on_audit_error: Optional[Callable[[BaseException], None]] = None,
     ) -> None:
         self.config = config
         if rules is None:
@@ -69,6 +70,7 @@ class RiskEngine:
         self.sizer = sizer
         self.broker = broker
         self.audit = audit
+        self.on_audit_error = on_audit_error
         self.raise_on_reject = raise_on_reject
         self._clock = clock
         self._state = state if state is not None else RiskState.initial()
@@ -118,8 +120,7 @@ class RiskEngine:
             )
             results = tuple(rule.evaluate(ctx) for rule in self.rules)
             decision = self._aggregate(order, results, now)
-            if self.audit is not None:
-                self.audit.record_decision(decision)
+            self._safe_audit(lambda a: a.record_decision(decision))
             return decision
 
     def submit(self, order: Order, portfolio: Portfolio) -> Optional[BrokerOrder]:
@@ -141,8 +142,8 @@ class RiskEngine:
                     "submit() requires a broker; none configured on engine"
                 )
             broker_order = self.broker.submit_order(decision.order)
-            if self.audit is not None:
-                self.audit.record_event(
+            self._safe_audit(
+                lambda a: a.record_event(
                     "fill",
                     self._clock(),
                     broker_order_id=broker_order.broker_order_id,
@@ -151,6 +152,7 @@ class RiskEngine:
                     filled_quantity=broker_order.filled_quantity,
                     filled_avg_price=broker_order.filled_avg_price,
                 )
+            )
             return broker_order
 
     def size_and_submit(
@@ -186,15 +188,35 @@ class RiskEngine:
             now = self._clock()
             was_tripped = self._state.breaker_tripped
             self._state = self._state.reset_breaker(now)
-            if was_tripped and self.audit is not None:
-                self.audit.record_event(
-                    "breaker_reset", now, equity=self._state.last_equity
+            if was_tripped:
+                self._safe_audit(
+                    lambda a: a.record_event(
+                        "breaker_reset", now, equity=self._state.last_equity
+                    )
                 )
             return self._state
 
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+    def _safe_audit(self, action: "Callable[[AuditSink], None]") -> None:
+        """执行一次审计写入,**绝不让审计失败阻断风控裁决**。
+
+        审计是次要职责:磁盘满、IO 异常等绝不能把 allow/deny 的主判决带崩。失败时
+        转交 ``on_audit_error`` 回调(缺省静默),风控裁决照常返回。
+        """
+        audit = self.audit
+        if audit is None:
+            return
+        try:
+            action(audit)
+        except Exception as e:  # noqa: BLE001 —— 审计失败不得中断风控
+            if self.on_audit_error is not None:
+                try:
+                    self.on_audit_error(e)
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _observe_locked(self, portfolio: Portfolio, now: datetime) -> None:
         """在已持锁的前提下观测权益并按需触发熔断。"""
         was_tripped = self._state.breaker_tripped
@@ -210,14 +232,16 @@ class RiskEngine:
             )
             new_state = new_state.trip(reason, now)
         self._state = new_state
-        if not was_tripped and new_state.breaker_tripped and self.audit is not None:
-            self.audit.record_event(
-                "breaker_trip",
-                now,
-                reason=new_state.trip_reason,
-                equity=new_state.last_equity,
-                high_water_mark=new_state.high_water_mark,
-                drawdown=new_state.drawdown,
+        if not was_tripped and new_state.breaker_tripped:
+            self._safe_audit(
+                lambda a: a.record_event(
+                    "breaker_trip",
+                    now,
+                    reason=new_state.trip_reason,
+                    equity=new_state.last_equity,
+                    high_water_mark=new_state.high_water_mark,
+                    drawdown=new_state.drawdown,
+                )
             )
 
     def _aggregate(
