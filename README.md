@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Tests](https://img.shields.io/badge/tests-672%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-698%20passing-brightgreen.svg)
 ![Core deps](https://img.shields.io/badge/core%20deps-0-brightgreen.svg)
 ![PRs](https://img.shields.io/badge/PRs-welcome-orange.svg)
 
@@ -173,6 +173,27 @@ size = risk_capped_weights(target_weights, RiskConfig(max_position_pct=0.10))
 
 ---
 
+## 🎚️ 三档预设 + 命令行(v1.2)
+
+不想逐个调参?挑一档起步——**保守 / 均衡 / 激进**:
+
+```python
+from riskguard import get_preset, RiskEngine
+engine = RiskEngine(get_preset("conservative"))   # 或 "balanced" / "aggressive"
+# 再用 config.replace(...) 微调成你自己的口径
+```
+
+装好后还带一个**零依赖命令行**,一键验单、看预设、跑对比:
+
+```bash
+$ riskguard check --preset balanced --equity 100000 --side buy --qty 1000 --price 200
+裁决:  RESIZE
+放行:  BUY 50 ASSET  (占权益 10.0%)
+
+$ riskguard presets                               # 三档参数对照表
+$ riskguard replay --prices 100,96,90,82,75,70    # 套风控 vs 不套 的回撤对比
+```
+
 ## 🗺️ 架构
 
 ```
@@ -218,7 +239,7 @@ size = risk_capped_weights(target_weights, RiskConfig(max_position_pct=0.10))
 
 - [ ] Alpaca 适配器实盘打通(下单/持仓/撤单端到端)
 - [ ] 更多券商:盈透(IBKR)、加密交易所(ccxt)
-- [ ] 配置预设:保守 / 均衡 / 激进 三档开箱模板
+- [x] 配置预设 + CLI:保守/均衡/激进三档 + 命令行(v1.2 ✅)
 - [x] 与 backtesting.py / vectorbt 的一键接线(v1.1 ✅)
 - [ ] 审计外部锚定(WORM / 公证)
 
@@ -226,7 +247,7 @@ size = risk_capped_weights(target_weights, RiskConfig(max_position_pct=0.10))
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 672 passed
+pytest            # 698 passed
 mypy src && ruff check src
 ```
 

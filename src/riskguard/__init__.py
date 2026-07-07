@@ -42,6 +42,7 @@ from .models import (
     Signal,
 )
 from .monitor import RiskMonitor
+from .presets import AGGRESSIVE, BALANCED, CONSERVATIVE, PRESETS, get_preset
 from .rules import (
     DrawdownCircuitBreaker,
     GrossExposureLimit,
@@ -60,7 +61,7 @@ from .sizing import (
 )
 from .state import RiskState
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "__version__",
@@ -69,6 +70,12 @@ __all__ = [
     "RiskConfig",
     "DEFAULT_CONFIG",
     "RiskState",
+    # 配置预设
+    "CONSERVATIVE",
+    "BALANCED",
+    "AGGRESSIVE",
+    "PRESETS",
+    "get_preset",
     # 数据模型
     "Order",
     "OrderType",

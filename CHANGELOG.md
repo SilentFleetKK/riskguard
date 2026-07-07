@@ -2,6 +2,38 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-07-06
+
+新增**配置预设**与**零依赖命令行工具**。
+
+### 新增
+- **配置预设** `riskguard.presets`:`CONSERVATIVE` / `BALANCED` / `AGGRESSIVE` 三档
+  开箱模板 + `get_preset(name)` 查询(大小写不敏感)。`BALANCED` 等价库默认。
+- **命令行** `riskguard`(亦可 `python -m riskguard`,纯标准库):
+  - `riskguard presets` —— 三档参数对照表。
+  - `riskguard check` —— 用某档预设检查一笔订单(放行/缩量/拒单 + 原因),退出码
+    反映裁决(0 放行 / 1 拒单 / 2 输入错误)。
+  - `riskguard replay` —— 对一段价格(`--prices` 或 `--csv`)跑"买入持有:套风控
+    vs 不套"的回撤对比。
+- 新增 `examples/08_presets.py`;顶层导出 `CONSERVATIVE/BALANCED/AGGRESSIVE/PRESETS/get_preset`。
+- 测试增至 698 项。
+
+### 修复(发布前对抗式审查)
+- **[critical] CSV 静默篡改价格**:`replay --csv` 曾用朴素 `split(",")` 取最后一列,把
+  千分位价 `1,250` 读成 `250`、丢弃带引号字段。改用标准库 `csv` 解析,支持 `--csv-column`
+  选列,坏行**显式计数并告警**,拒绝非正/非有限价——绝不静默编造行情。
+- **[high] 文件错误崩栈**:`--csv` 指向目录/不可读文件曾抛未捕获异常。`main()` 改捕获
+  `OSError`,统一返回退出码 2。
+- **[medium] nan/inf 输入**:`--equity/--price/--qty/--cash` 在边界校验有限性(拒绝
+  nan/inf),`--price/--qty/--cash` 还须为正;equity≤0 时权重显示 `n/a` 而非误导的 0.0%。
+- **[low] 预设一致性**:`--prices` 与 `--csv` 改为互斥;`check` 缩量返回专属退出码 3
+  (原样放行仍 0);选 `aggressive` 会在 stderr 给出风险提醒。
+
+### 变更
+- **预设参数收敛得更稳健**:`aggressive` 单笔上限 25%→20%、Kelly 0.75→0.50(不越过 config
+  自身认可的"实务常用 0.25~0.5");三档均设**净敞口上限**且单调不减(1.0/1.0/1.5),
+  最激进档不再是唯一"净敞口不设限"的一档。总敞口明确为组合层天花板(非单笔)。
+
 ## [1.1.0] - 2026-07-06
 
 新增**回测接线**模块 `riskguard.backtest`,连通量化五层积木的「回测 → 风控」两层。
