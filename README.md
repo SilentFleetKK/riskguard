@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Tests](https://img.shields.io/badge/tests-661%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-672%20passing-brightgreen.svg)
 ![Core deps](https://img.shields.io/badge/core%20deps-0-brightgreen.svg)
 ![PRs](https://img.shields.io/badge/PRs-welcome-orange.svg)
 
@@ -146,6 +146,31 @@ with RiskMonitor(engine, broker, interval=5.0, auto_liquidate=True):
     ...   # 后台线程:周期观测权益 → 触及回撤红线自动熔断并平仓
 ```
 
+## 🔌 接进你的回测框架(v1.1)
+
+把 RiskGuard 作为"风险叠加层"接进 backtesting.py / vectorbt,让**策略研究和爆仓防护第一次在同一条流水线上**([`examples/07`](examples/07_backtest_overlay.py))。
+
+```python
+# 框架无关的叠加层:目标持仓 → 风控批准的订单;还能一键跑"套风控 vs 不套"对比
+from riskguard.backtest import RiskOverlay, compare
+
+res = compare(prices, my_strategy, config=RiskConfig(max_position_pct=0.10))
+print(res["naive"].max_drawdown, res["guarded"].max_drawdown)  # 例:−45% vs −5.6%
+```
+
+```python
+# backtesting.py:子类只写 signal() 返回目标权重,下单自动过风控
+from riskguard.backtest import make_riskguard_strategy
+class MyStrat(make_riskguard_strategy(RiskConfig(max_position_pct=0.10))):
+    def signal(self): return 1.0 if bullish else 0.0
+```
+
+```python
+# vectorbt:把仓位按上限封顶(纯函数,不装 vectorbt 也能用)
+from riskguard.backtest import risk_capped_weights, kelly_weights
+size = risk_capped_weights(target_weights, RiskConfig(max_position_pct=0.10))
+```
+
 ---
 
 ## 🗺️ 架构
@@ -194,14 +219,14 @@ with RiskMonitor(engine, broker, interval=5.0, auto_liquidate=True):
 - [ ] Alpaca 适配器实盘打通(下单/持仓/撤单端到端)
 - [ ] 更多券商:盈透(IBKR)、加密交易所(ccxt)
 - [ ] 配置预设:保守 / 均衡 / 激进 三档开箱模板
-- [ ] 与 backtesting.py / vectorbt 的一键接线示例
+- [x] 与 backtesting.py / vectorbt 的一键接线(v1.1 ✅)
 - [ ] 审计外部锚定(WORM / 公证)
 
 ## 🛠️ 开发
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 661 passed
+pytest            # 672 passed
 mypy src && ruff check src
 ```
 

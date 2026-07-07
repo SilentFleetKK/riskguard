@@ -2,6 +2,38 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-07-06
+
+新增**回测接线**模块 `riskguard.backtest`,连通量化五层积木的「回测 → 风控」两层。
+
+### 新增
+- **`RiskOverlay`** —— 框架无关的风险叠加层:把"目标持仓/权重"翻译成风控批准(或缩量)
+  的下一步订单;`approved_target_weight()` 直接给按权重再平衡的框架用;累计缩单/拒单/
+  熔断/拦截统计。
+- **`replay` / `compare`** —— 轻量价格重放器,一键跑"套风控 vs 不套风控"对比(非通用
+  回测框架,仅用于看见/测试风控行为)。
+- **`make_riskguard_strategy`** —— backtesting.py 适配器:子类只写 `signal()` 返回目标
+  权重,下单自动过风控(可选依赖 `riskguard[backtesting]`,懒加载)。
+- **`risk_capped_weights` / `kelly_weights`** —— vectorbt 用的纯函数仓位辅助(无需装
+  vectorbt);**`from_signals_with_risk`** —— 封顶后跑 `vbt.Portfolio.from_signals`。
+- 新增 `examples/07_backtest_overlay.py`:双均线策略 + 风控叠加,展示崩盘中缩单/熔断/
+  拦截追高三道防线同时出手。
+- 测试增至 675 项(新增回测模块测试 + 回归测试)。
+
+### 修复(回测模块发布前对抗式审查)
+- **[critical] backtesting.py 适配器每 bar 叠单**:旧的 `_rebalance_to` 把"应持有的目标
+  权重"当成每 bar 的下单量,导致同向持仓不断加仓、失控杠杆——正是本库要防的过度集中。
+  改为按方向 long/flat(short/flat)建平仓:空仓才开到目标、同向不重复加仓。
+- **[high] 坏 tick 崩溃**:价格 ≤ 0 的坏 tick 曾让"套风控"重放抛 `BrokerError`(而裸执行
+  安然跳过),`compare` 直接中断。现两条路径对称跳过坏 tick,叠加层也不再把坏价误当清仓。
+- **[high] `approved_target_weight` 副作用**:是一次完整的(有副作用的)预交易检查;
+  `OverlayResult` 新增 `approved_weight` 字段,单次调用即可同时拿到订单与权重,并加显著
+  文档提醒它是"每 bar 唯一 overlay 调用"。
+- **[medium] 回撤/收益基线不一致**:曲线以起始资本为第 0 点,`max_drawdown` 与
+  `total_return` 共用同一基线,回撤可从返回曲线本身复算。
+- **[medium] 适配器现金双算**:`_portfolio_from` 现金改为 `权益 − 持仓市值`。
+- **[low] vectorbt `from_signals_with_risk`**:调用方自带 `size` 时也会被封顶,不再静默透传。
+
 ## [1.0.1] - 2026-07-06
 
 第二轮独立对抗式审查发现并修复的 fail-open 边界(对安全关键的风控库尤为重要)。

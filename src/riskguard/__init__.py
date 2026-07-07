@@ -60,7 +60,7 @@ from .sizing import (
 )
 from .state import RiskState
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 __all__ = [
     "__version__",

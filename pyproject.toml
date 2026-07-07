@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "riskguard"
-version = "1.0.1"
+version = "1.1.0"
 description = "券商无关的开源交易风控层:仓位上限、总亏损熔断、动态仓位、审计追溯与实时监控守护。"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,13 +36,15 @@ dependencies = []
 
 [project.optional-dependencies]
 alpaca = ["alpaca-py>=0.20"]
+backtesting = ["backtesting>=0.3"]
+vectorbt = ["vectorbt>=0.25"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "mypy>=1.8",
     "ruff>=0.3",
 ]
-all = ["riskguard[alpaca,dev]"]
+all = ["riskguard[alpaca,backtesting,vectorbt,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/riskguard/riskguard"
