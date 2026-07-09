@@ -50,9 +50,9 @@ all = ["riskguard[alpaca,backtesting,vectorbt,dev]"]
 riskguard = "riskguard.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/riskguard/riskguard"
-Documentation = "https://github.com/riskguard/riskguard#readme"
-Issues = "https://github.com/riskguard/riskguard/issues"
+Homepage = "https://github.com/SilentFleetKK/riskguard"
+Documentation = "https://github.com/SilentFleetKK/riskguard#readme"
+Issues = "https://github.com/SilentFleetKK/riskguard/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/riskguard"]
