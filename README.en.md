@@ -20,7 +20,7 @@
 
 Quant trading has five building blocks — **data → research → backtesting → risk control → execution.** Data has OpenBB, research has Qlib, backtesting has backtesting.py/vectorbt, execution has Alpaca. **The risk-control layer is the only one without a mature open-source standard.** RiskGuard exists to fill that gap.
 
-Risk control isn't really a technology problem — it's **discipline you write down in advance and never let yourself override**. RiskGuard turns the handful of rules that stop most blowups into a broker-agnostic, dependency-free, composable library the system enforces automatically — because the moment you're actually losing money, willpower is the least reliable thing on earth.
+Risk control isn't really a technology problem — it's **discipline you write down in advance and never let yourself override**. RiskGuard turns the handful of rules that stop most blowups into a dependency-free, composable library the system enforces automatically — because the moment you're actually losing money, willpower is the least reliable thing on earth.
 
 <details>
 <summary><strong>📖 Table of Contents</strong></summary>
@@ -98,7 +98,7 @@ You could. But the hard part of risk control was never "can I write the logic" �
 | 🌙 Daily digest / stress test | `build_digest` / `run_stress_test` | Structured summary for an AI agent to narrate; a one-shot "what if it drops 20%" projection, zero side effects |
 | 📿 Tamper-evident ledger | `JsonlAuditSink` / `SqliteAuditSink` | Every decision/trip/fill gets a hash-chained record, optional HMAC for real tamper resistance |
 | 🔒 State persistence | `SqliteStateStore` | High-water mark and breaker state written to disk — a restart is no longer a loophole |
-| 🔌 Broker-agnostic | `Broker` / `PaperBroker` / `AlpacaBroker` | Paper broker, Alpaca, or your own backend — implement one interface and you're in |
+| 🔌 Pluggable execution layer | `Broker` / `PaperBroker` / `AlpacaBroker` | Paper broker, Alpaca, or your own backend — implement one interface and you're in |
 
 > **Two layers, strictly separated**: `Sizer` decides "how big a bet"; `Rule` decides "can it go through, does it need trimming, should everything stop." AI can research, write code, poke holes in your logic — but **every real order still has to clear these hard-coded rules first.**
 
@@ -322,7 +322,7 @@ $ riskguard replay --prices 100,96,90,82,75,70    # guarded vs naive drawdown co
 - You already use backtesting.py / vectorbt / your own execution layer, and you're missing a risk middleware that **doesn't lock you into any framework**
 - You want an AI agent to research and trade for you, but you **won't let it touch real money unsupervised** — RiskGuard is the gate the AI can't route around
 - You've blown up an account once, or fought a battle of ego with the market once, and you want "discipline" out of your head and into code instead of relying on willpower
-- You need a **broker-agnostic** risk middleware that can plug into Alpaca or a backend you built yourself
+- You need a risk middleware that can plug into Alpaca or a backend you built yourself
 - You want a project that was "built from scratch, with real tests and paper-trading battle scars" as a portfolio piece
 
 ## 🧭 Design Principles

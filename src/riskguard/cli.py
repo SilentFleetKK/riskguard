@@ -362,7 +362,7 @@ def _load_prices(args: argparse.Namespace) -> list[float]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="riskguard",
-        description="RiskGuard —— 券商无关的开源交易风控层。",
+        description="RiskGuard —— 开源交易风控层。",
     )
     parser.add_argument(
         "--version", action="version", version=f"riskguard {__version__}"

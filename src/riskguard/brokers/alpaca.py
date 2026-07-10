@@ -1,6 +1,6 @@
 """Alpaca 券商适配器(可选依赖 ``alpaca-py``)。
 
-把 RiskGuard 券商无关的 :class:`~riskguard.brokers.base.Broker` 接口桥接到
+把 RiskGuard 的 :class:`~riskguard.brokers.base.Broker` 接口桥接到
 Alpaca 官方 SDK(导入名 ``alpaca``)。该 SDK 是**可选依赖**:核心库零第三方
 依赖,只有真正要接 Alpaca 时才装。因此本模块**绝不在顶层 import alpaca**——
 否则未装依赖的环境连 ``import riskguard`` 都会炸。依赖统一在 :meth:`__init__`
