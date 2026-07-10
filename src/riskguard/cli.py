@@ -5,8 +5,18 @@
 - ``riskguard presets``  列出三档配置预设及关键参数
 - ``riskguard check``    用某档预设检查一笔订单(放行/缩量/拒单 + 原因)
 - ``riskguard replay``   对一段价格跑"买入持有:套风控 vs 不套"的回撤对比
+- ``riskguard digest``   每日体检:高水位/回撤/熔断距离/持仓 vs 上限,一份摘要
+- ``riskguard stress``   压力测试:给持仓统一冲击(如 -20%),看会不会触发熔断
 
-退出码:``0`` 放行(原样)· ``3`` 放行但被缩量 · ``1`` 拒单 · ``2`` 用法/输入/IO 错误。
+退出码(便于脚本判断,各子命令含义略有不同):
+
+- ``check``:   0 放行(原样)· 3 放行但被缩量 · 1 拒单 · 2 用法/输入/IO 错误
+- ``digest``:  0 熔断正常 · 1 熔断已触发 · 2 用法/输入/IO 错误
+- ``stress``:  0 冲击不会触发熔断/超限 · 3 冲击会触发熔断或超出仓位上限 · 2 用法/输入/IO 错误
+- ``replay``/``presets``: 0 正常完成 · 2 用法/输入/IO 错误
+
+⚠️ 同一个数字在不同子命令下含义不同(``check`` 的 1 = 订单被拒,``digest`` 的
+1 = 熔断已触发)——脚本按退出码分支时必须连着子命令一起判断,不能只看数字。
 """
 
 from __future__ import annotations
@@ -14,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import sys
 from collections.abc import Sequence
 
@@ -63,6 +74,69 @@ def _fmt_weight(qty: float, price: float, equity: float) -> str:
     return "n/a"
 
 
+def _parse_position_specs(specs: Sequence[str]) -> dict[str, Position]:
+    """解析可重复的 ``--position SYMBOL:QTY:PRICE`` 参数,供 digest/stress 用。"""
+    positions: dict[str, Position] = {}
+    for spec in specs:
+        parts = spec.split(":")
+        if len(parts) != 3:
+            raise ConfigError(f"--position 格式应为 SYMBOL:QTY:PRICE,收到 {spec!r}")
+        symbol, qty_s, price_s = (p.strip() for p in parts)
+        if not symbol:
+            raise ConfigError(f"--position 标的代码不能为空:{spec!r}")
+        try:
+            qty = float(qty_s)
+            price = float(price_s)
+        except ValueError as exc:
+            raise ConfigError(f"--position 数量/价格必须是数字:{spec!r}") from exc
+        if not math.isfinite(qty) or qty == 0.0:
+            raise ConfigError(f"--position 数量必须是非零有限数:{spec!r}")
+        if not math.isfinite(price) or price <= 0.0:
+            raise ConfigError(f"--position 价格必须是正的有限数:{spec!r}")
+        if symbol in positions:
+            raise ConfigError(f"--position 标的重复出现:{symbol!r}")
+        positions[symbol] = Position(symbol, qty, price)
+    return positions
+
+
+def _build_portfolio_multi(equity: float, positions: dict[str, Position]) -> Portfolio:
+    """由多笔 ``--position`` 拼一个组合快照,现金 = 权益 − 全部持仓市值之和。"""
+    invested = sum(pos.quantity * pos.avg_price for pos in positions.values())
+    cash = equity - invested
+    marks = {sym: pos.avg_price for sym, pos in positions.items()}
+    return Portfolio(Account(equity=equity, cash=cash), positions, marks)
+
+
+def _open_state_store(args: argparse.Namespace) -> SqliteStateStore | None:
+    return SqliteStateStore(args.state_db, key=args.state_key) if args.state_db else None
+
+
+def _warn_persist_error(exc: BaseException) -> None:
+    print(f"warning: 状态持久化写入失败,重启保护本次未生效: {exc!r}", file=sys.stderr)
+
+
+def _load_state_readonly(args: argparse.Namespace):
+    """给压力测试专用的只读读取:不存在的文件绝不碰,不留下任何新文件/空表。
+
+    ``SqliteStateStore`` 的构造函数本身会 ``CREATE TABLE IF NOT EXISTS``——对一个
+    还不存在的文件,这一步就会在磁盘上凭空建出一个空库。压力测试是"如果……会怎样"
+    的一次性假设提问,连"留下一个空文件"都不该发生,所以这里先判断文件是否已经
+    存在,不存在就直接当成"没有历史记录",完全不碰文件系统。
+
+    注:存在与否的判断和随后打开文件之间有一个理论上的竞态窗口(比如另一个进程
+    在这两步之间刚好写入了存档)——影响仅限于"读到一份稍旧的快照",压力测试本身
+    绝不写入,不会因此损坏任何数据。本库的既定约定是"一个存档/key 只能有一个活跃
+    写者"(见 SqliteStateStore 的乐观锁),已排除严格并发一致性的场景。
+    """
+    if not args.state_db or not os.path.exists(args.state_db):
+        return None
+    store = SqliteStateStore(args.state_db, key=args.state_key)
+    try:
+        return store.load()
+    finally:
+        store.close()
+
+
 def _warn_if_aggressive(preset: str) -> None:
     if preset == "aggressive":
         print(
@@ -107,13 +181,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # 没有它,每次调用都是一个全新引擎——脚本反复调用本身就是一种"重启绕过熔断"。
     # --state-key:同一个 db 文件跑多个策略/标的时必须用不同 key,否则会互相
     # 覆盖对方的状态(SqliteStateStore 用乐观锁检测这种冲突并报错,而不是静默覆盖)。
-    store = (
-        SqliteStateStore(args.state_db, key=args.state_key) if args.state_db else None
-    )
-
-    def _warn_persist_error(exc: BaseException) -> None:
-        print(f"warning: 状态持久化写入失败,重启保护本次未生效: {exc!r}", file=sys.stderr)
-
+    store = _open_state_store(args)
     try:
         engine = RiskEngine(
             config,
@@ -171,6 +239,56 @@ def cmd_replay(args: argparse.Namespace) -> int:
     print(f"{'总收益':<11}{naive.total_return:>13.1%}{guard.total_return:>15.1%}")
     print(f"{'最大回撤':<10}{naive.max_drawdown:>13.1%}{guard.max_drawdown:>15.1%}")
     return 0
+
+
+def cmd_digest(args: argparse.Namespace) -> int:
+    """每日体检:观测一次当前持仓(推进高水位历史),打印一份状态摘要。
+
+    与 ``check``/``update_equity`` 一样,这一步**会**观测权益、可能触发熔断、
+    并写入 ``--state-db``(如果配了)——digest 命令本身是"今天的一次记录点",
+    不是纯只读预览。库函数 :func:`riskguard.reporting.build_digest` 才是零副作用的
+    纯读取,供已经在别处观测过权益的调用方(比如接了 RiskMonitor 的 AI agent)
+    直接取快照用。
+    """
+    from .reporting import build_digest, render_digest_text
+
+    _warn_if_aggressive(args.preset)
+    config = get_preset(args.preset)
+    store = _open_state_store(args)
+    try:
+        engine = RiskEngine(
+            config,
+            state_store=store,
+            on_persist_error=_warn_persist_error if store is not None else None,
+        )
+        positions = _parse_position_specs(args.position)
+        portfolio = _build_portfolio_multi(args.equity, positions)
+        engine.update_equity(portfolio)  # 记录今天这一次观测,推进高水位历史
+        report = build_digest(engine, portfolio)
+        print(render_digest_text(report))
+        return 1 if report.breaker_tripped else 0
+    finally:
+        if store is not None:
+            store.close()
+
+
+def cmd_stress(args: argparse.Namespace) -> int:
+    """压力测试:给当前持仓一个统一冲击,推演结果。绝不改变引擎的真实状态
+    ——不观测权益、不触发熔断、不写持久化、不在磁盘上留下任何新文件(见
+    :mod:`riskguard.reporting.stress` 模块文档 与 :func:`_load_state_readonly`),
+    纯粹是"如果……会怎样"的一次性推演。
+    """
+    from .reporting import render_stress_text, run_stress_test
+
+    _warn_if_aggressive(args.preset)
+    config = get_preset(args.preset)
+    restored_state = _load_state_readonly(args)
+    engine = RiskEngine(config, state=restored_state)  # 不传 state_store:全程只读
+    positions = _parse_position_specs(args.position)
+    portfolio = _build_portfolio_multi(args.equity, positions)
+    result = run_stress_test(engine, portfolio, args.shock)
+    print(render_stress_text(result))
+    return 3 if (result.would_trip_breaker or result.position_breaches) else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -284,6 +402,46 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--csv-column", help="CSV 价格列名或列索引(默认最后一列)")
     sr.add_argument("--cash", type=_positive_float, default=100_000.0)
     sr.set_defaults(func=cmd_replay)
+
+    sd = sub.add_parser(
+        "digest", help="每日体检:高水位/回撤/熔断距离/持仓 vs 上限,一份摘要"
+    )
+    sd.add_argument("--preset", default="balanced", choices=sorted(PRESETS))
+    sd.add_argument("--equity", type=_finite_float, required=True, help="账户总权益")
+    sd.add_argument(
+        "--position",
+        action="append",
+        default=[],
+        metavar="SYMBOL:QTY:PRICE",
+        help="一笔持仓,可重复传多次(如 --position AAPL:100:190 --position TSLA:-20:250)",
+    )
+    sd.add_argument("--state-db", help="持久化高水位/熔断状态的 SQLite 文件路径")
+    sd.add_argument("--state-key", default="default", help="见 check 子命令的说明")
+    sd.set_defaults(func=cmd_digest)
+
+    ss = sub.add_parser(
+        "stress", help="压力测试:给持仓统一冲击(如 -20%%),看会不会触发熔断"
+    )
+    ss.add_argument("--preset", default="balanced", choices=sorted(PRESETS))
+    ss.add_argument("--equity", type=_finite_float, required=True, help="账户总权益")
+    ss.add_argument(
+        "--position",
+        action="append",
+        default=[],
+        metavar="SYMBOL:QTY:PRICE",
+        help="一笔持仓,可重复传多次(如 --position AAPL:100:190 --position TSLA:-20:250)",
+    )
+    ss.add_argument(
+        "--shock",
+        type=_finite_float,
+        required=True,
+        help="统一冲击幅度,带符号,如 -0.20 表示所有标的统一下跌 20%%",
+    )
+    ss.add_argument(
+        "--state-db", help="从存档读取高水位/熔断状态(只读,压力测试绝不写回存档)"
+    )
+    ss.add_argument("--state-key", default="default", help="见 check 子命令的说明")
+    ss.set_defaults(func=cmd_stress)
 
     return parser
 
