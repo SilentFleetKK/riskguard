@@ -15,12 +15,13 @@ import argparse
 import csv
 import math
 import sys
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from . import __version__
 from .engine import RiskEngine
 from .exceptions import ConfigError, RiskGuardError
 from .models import Account, Order, Portfolio, Position, Side
+from .persistence import SqliteStateStore
 from .presets import PRESETS, get_preset
 
 
@@ -101,37 +102,59 @@ def cmd_presets(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     _warn_if_aggressive(args.preset)
     config = get_preset(args.preset)
-    engine = RiskEngine(config)
-    portfolio = _build_portfolio(args.equity, args.symbol, args.price, args.position)
-    order = Order(
-        symbol=args.symbol,
-        side=Side(args.side),
-        quantity=args.qty,
-        reduce_only=args.reduce_only,
-    )
-    decision = engine.check(order, portfolio)
-    equity = portfolio.equity
 
-    print(f"预设:  {args.preset}")
-    print(
-        f"请求:  {args.side.upper()} {args.qty:g} {args.symbol} @ {args.price:g}  "
-        f"(占权益 {_fmt_weight(order.quantity, args.price, equity)})"
+    # --state-db:跨多次 CLI 调用持久化高水位/熔断状态(例如 cron 定时验单)。
+    # 没有它,每次调用都是一个全新引擎——脚本反复调用本身就是一种"重启绕过熔断"。
+    # --state-key:同一个 db 文件跑多个策略/标的时必须用不同 key,否则会互相
+    # 覆盖对方的状态(SqliteStateStore 用乐观锁检测这种冲突并报错,而不是静默覆盖)。
+    store = (
+        SqliteStateStore(args.state_db, key=args.state_key) if args.state_db else None
     )
-    print(f"裁决:  {decision.decision.value.upper()}")
-    if decision.approved:
-        print(
-            f"放行:  {args.side.upper()} {decision.order.quantity:g} {args.symbol}  "
-            f"(占权益 {_fmt_weight(decision.order.quantity, args.price, equity)})"
+
+    def _warn_persist_error(exc: BaseException) -> None:
+        print(f"warning: 状态持久化写入失败,重启保护本次未生效: {exc!r}", file=sys.stderr)
+
+    try:
+        engine = RiskEngine(
+            config,
+            state_store=store,
+            on_persist_error=_warn_persist_error if store is not None else None,
         )
-    reasons = decision.reasons()
-    if reasons:
-        print(f"原因:  {reasons}")
+        portfolio = _build_portfolio(args.equity, args.symbol, args.price, args.position)
+        order = Order(
+            symbol=args.symbol,
+            side=Side(args.side),
+            quantity=args.qty,
+            reduce_only=args.reduce_only,
+        )
+        decision = engine.check(order, portfolio)
+        equity = portfolio.equity
 
-    if decision.rejected:
-        return 1
-    if decision.resized:
-        return 3  # 放行但被缩量(便于脚本区分"原样通过")
-    return 0
+        print(f"预设:  {args.preset}")
+        if store is not None:
+            print(f"状态:  {args.state_db}(跨调用持久化)")
+        print(
+            f"请求:  {args.side.upper()} {args.qty:g} {args.symbol} @ {args.price:g}  "
+            f"(占权益 {_fmt_weight(order.quantity, args.price, equity)})"
+        )
+        print(f"裁决:  {decision.decision.value.upper()}")
+        if decision.approved:
+            print(
+                f"放行:  {args.side.upper()} {decision.order.quantity:g} {args.symbol}  "
+                f"(占权益 {_fmt_weight(decision.order.quantity, args.price, equity)})"
+            )
+        reasons = decision.reasons()
+        if reasons:
+            print(f"原因:  {reasons}")
+
+        if decision.rejected:
+            return 1
+        if decision.resized:
+            return 3  # 放行但被缩量(便于脚本区分"原样通过")
+        return 0
+    finally:
+        if store is not None:
+            store.close()
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
@@ -170,13 +193,13 @@ def _coerce_prices(tokens: Sequence[str]) -> tuple[list[float], int]:
     return prices, skipped
 
 
-def _load_prices_csv(path: str, column: Optional[str]) -> tuple[list[float], int]:
+def _load_prices_csv(path: str, column: str | None) -> tuple[list[float], int]:
     with open(path, newline="", encoding="utf-8") as fh:
         rows = list(csv.reader(fh))  # 正确处理引号/内嵌逗号,不再朴素 split
     if not rows:
         return [], 0
     header = rows[0]
-    col_idx: Optional[int] = None
+    col_idx: int | None = None
     if column is not None:
         if column in header:
             col_idx = header.index(column)
@@ -240,6 +263,17 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--price", type=_positive_float, required=True)
     sc.add_argument("--position", type=_finite_float, default=0.0, help="当前持仓(带符号)")
     sc.add_argument("--reduce-only", action="store_true")
+    sc.add_argument(
+        "--state-db",
+        help="跨多次调用持久化高水位/熔断状态的 SQLite 文件路径(例如 cron 定时验单)。"
+        "不传则每次调用都是全新状态,熔断不会跨调用保留。",
+    )
+    sc.add_argument(
+        "--state-key",
+        default="default",
+        help="同一个 --state-db 文件跑多个策略/标的时,每个必须用不同的 --state-key,"
+        "否则会互相覆盖对方的高水位/熔断状态(默认 'default')。",
+    )
     sc.set_defaults(func=cmd_check)
 
     sr = sub.add_parser("replay", help="买入持有:套风控 vs 不套 的回撤对比")
@@ -254,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)

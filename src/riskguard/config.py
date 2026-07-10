@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 from .exceptions import ConfigError
@@ -114,7 +114,7 @@ class RiskConfig:
         if value <= 0.0:
             raise ConfigError(f"{name} must be > 0, got {value}")
 
-    def replace(self, **changes: object) -> "RiskConfig":
+    def replace(self, **changes: object) -> RiskConfig:
         """返回一个应用了变更的新配置(不可变模式)。"""
         from dataclasses import replace
 

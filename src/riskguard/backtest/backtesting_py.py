@@ -22,8 +22,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from ..config import RiskConfig
 from ..models import Account, Portfolio, Position
 from .overlay import RiskOverlay
@@ -53,7 +51,7 @@ def _portfolio_from(equity: float, cur_qty: float, price: float) -> Portfolio:
     return Portfolio(Account(equity=equity, cash=cash), positions, {_SYMBOL: price})
 
 
-def make_riskguard_strategy(config: Optional[RiskConfig] = None):
+def make_riskguard_strategy(config: RiskConfig | None = None):
     """返回一个继承 ``backtesting.Strategy`` 的基类,内置 RiskGuard 风控闸门。
 
     子类只需实现 :meth:`signal` 返回目标权重([−1, 1]);基类每个 bar 把它过一遍风控

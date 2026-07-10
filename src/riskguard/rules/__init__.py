@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ..config import RiskConfig
 
 
-def build_default_rules(config: "RiskConfig") -> list[RiskRule]:
+def build_default_rules(config: RiskConfig) -> list[RiskRule]:
     """按配置组装默认规则栈:文章那三条铁律 + 组合层敞口上限。
 
     顺序上把熔断放最前(命中即快速拒单),其余规则的结果由引擎统一聚合,

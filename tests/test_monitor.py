@@ -776,3 +776,43 @@ class ExplodingBroker(Broker):
 
     def get_positions(self) -> dict[str, Position]:  # pragma: no cover - 未触及
         raise RuntimeError("boom")
+
+
+# ---------------------------------------------------------------------------
+# 第二轮审查:_handled_trip 从 engine.breaker_tripped 播种(重启后不重复响应)
+# ---------------------------------------------------------------------------
+def test_handled_trip_seeded_true_when_engine_already_tripped() -> None:
+    """模拟"进程重启":引擎从存档恢复出已触发的熔断状态,新建的 monitor 不该
+    把它当成一次全新的触发去重复回调/重复平仓——它把"已经是触发态"当成
+    "已经被处理过"。"""
+    broker = make_paper_broker()
+    open_big_long(broker)
+    # 先用一个"旧" monitor 把引擎带到熔断态(模拟上一个进程已经处理过一次)
+    old_engine = make_engine(broker, clock=ListClock())
+    old_monitor = RiskMonitor(old_engine, broker)
+    drive_to_trip(broker, old_monitor)
+    assert old_engine.breaker_tripped is True
+
+    # "重启":同一个(已经处于熔断态的)引擎,构造一个全新的 monitor 实例
+    trips: list = []
+    new_monitor = RiskMonitor(old_engine, broker, on_trip=trips.append, auto_liquidate=True)
+    assert new_monitor._handled_trip is True  # 播种为"已处理",不是硬编码 False
+
+    new_monitor._tick()  # 第一个 tick:熔断仍是 True,但不该重新拉响
+    assert trips == []  # 不重复回调 on_trip
+    # 不重复平仓:仓位应保持"重启前"的样子(未被 new_monitor 二次强平)
+    assert broker.get_positions().get(SYMBOL) is not None
+
+
+def test_handled_trip_seeded_false_when_engine_not_tripped() -> None:
+    """引擎当前未触发熔断时,新 monitor 照旧从 False 开始,不影响正常首次触发。"""
+    broker = make_paper_broker()
+    open_big_long(broker)
+    engine = make_engine(broker, clock=ListClock())
+    monitor = RiskMonitor(engine, broker)
+    assert monitor._handled_trip is False
+
+    trips: list = []
+    monitor2 = RiskMonitor(engine, broker, on_trip=trips.append)
+    drive_to_trip(broker, monitor2)
+    assert len(trips) == 1  # 正常首次触发依然生效

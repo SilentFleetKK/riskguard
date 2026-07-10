@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from ..config import RiskConfig
 from ..models import Portfolio, Signal
 from .base import PositionSizer
@@ -18,7 +16,7 @@ class FixedFractionalSizer(PositionSizer):
 
     name = "fixed_fractional"
 
-    def __init__(self, fraction: Optional[float] = None) -> None:
+    def __init__(self, fraction: float | None = None) -> None:
         if fraction is not None and not (0.0 < fraction <= 1.0):
             raise ValueError(f"fraction must be in (0, 1], got {fraction}")
         self.fraction = fraction

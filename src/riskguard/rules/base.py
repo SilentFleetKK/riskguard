@@ -10,7 +10,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 from ..config import RiskConfig
 from ..models import Decision, Order, Portfolio, RuleResult

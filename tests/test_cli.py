@@ -136,3 +136,61 @@ def test_version_flag():
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
+
+
+# --------------------------------------------------------------------------- #
+# --state-db:跨调用持久化(堵住"反复重跑 CLI 绕过熔断"这条路)
+# --------------------------------------------------------------------------- #
+def test_state_db_persists_breaker_across_invocations(tmp_path, capsys):
+    db = str(tmp_path / "state.db")
+
+    # 第一次调用:权益从 100k 摔到 80k(-20%,击穿 15% 默认阈值),触发熔断
+    main(["check", "--state-db", db, "--equity", "100000",
+          "--side", "buy", "--qty", "10", "--price", "100"])
+    capsys.readouterr()
+    code1 = main(["check", "--state-db", db, "--equity", "80000",
+                  "--side", "buy", "--qty", "10", "--price", "100"])
+    out1 = capsys.readouterr().out
+    assert code1 == 1  # 已经缩小的仓位在跌破阈值时被拒
+    assert "TRIPPED" in out1 or "熔断" in out1 or "circuit" in out1.lower()
+
+    # 第二次"调用"(独立进程会发生的事):权益又回到 100k,看起来风平浪静,
+    # 但如果只靠单次调用内的状态,这次会重新算出"没有回撤"而放行——
+    # --state-db 应让熔断状态跨调用保留,新开仓依然被拒。
+    code2 = main(["check", "--state-db", db, "--equity", "100000",
+                  "--side", "buy", "--qty", "1", "--price", "100"])
+    out2 = capsys.readouterr().out
+    assert code2 == 1, "熔断状态应跨 CLI 调用持续,不能被下一次调用悄悄清零"
+    assert "状态:" in out2  # 提示用了持久化
+
+
+def test_state_db_allows_reduce_only_while_tripped(tmp_path, capsys):
+    db = str(tmp_path / "state.db")
+    main(["check", "--state-db", db, "--equity", "100000",
+          "--side", "buy", "--qty", "1", "--price", "100"])
+    capsys.readouterr()
+    main(["check", "--state-db", db, "--equity", "80000",
+          "--side", "buy", "--qty", "1", "--price", "100"])
+    capsys.readouterr()
+
+    code = main(["check", "--state-db", db, "--equity", "80000", "--position", "10",
+                 "--side", "sell", "--qty", "1", "--price", "100", "--reduce-only"])
+    assert code == 0  # 熔断中减仓仍放行
+
+
+def test_without_state_db_each_invocation_is_independent(capsys):
+    # 不传 --state-db:向后兼容,每次调用都是全新引擎,互不影响
+    main(["check", "--equity", "100000", "--side", "buy", "--qty", "10", "--price", "100"])
+    capsys.readouterr()
+    code = main(["check", "--equity", "80000", "--side", "buy", "--qty", "1", "--price", "100"])
+    capsys.readouterr()
+    assert code == 0  # 没有持久化,不知道之前发生过回撤,正常放行
+
+
+def test_state_db_corrupted_file_errors_cleanly(tmp_path, capsys):
+    db = tmp_path / "state.db"
+    db.write_bytes(b"not a sqlite database at all")
+    code = main(["check", "--state-db", str(db), "--equity", "100000",
+                 "--side", "buy", "--qty", "1", "--price", "100"])
+    assert code == 2
+    assert "error" in capsys.readouterr().err

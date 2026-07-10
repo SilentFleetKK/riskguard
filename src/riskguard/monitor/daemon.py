@@ -13,7 +13,10 @@
 * **kill-switch 不受风控规则阻挡**:平仓动作**直接**打到 broker,绕过
   :class:`RiskEngine` 的预交易闸门——熔断后风控若拦住平仓单,风险反而无法收敛。
 * **幂等触发**:熔断只处理一次(``_handled_trip``),人工 ``reset_breaker``
-  后自动重新武装,避免每个周期重复撤单/平仓。
+  后自动重新武装,避免每个周期重复撤单/平仓。这个幂等性**按 monitor 实例的生命周期
+  计**,不是按熔断本身计:构造时会从 ``engine.breaker_tripped`` 播种初始值,所以
+  "进程重启、引擎从 state_store 恢复出已触发的熔断"不会让新 monitor 在第一个 tick
+  重新拉响——它把"存档里已经是触发态"当成"已经被处理过"。
 * **线程安全**:生命周期(start/stop)加锁;引擎自身的状态访问已在引擎内加锁,
   broker 适配器需自行保证线程安全。
 """
@@ -21,8 +24,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from typing import Callable, Mapping, Optional
 
 from ..audit.base import AuditEvent
 from ..models import Order, Side
@@ -57,9 +60,9 @@ class RiskMonitor:
         *,
         interval: float = 5.0,
         auto_liquidate: bool = False,
-        on_trip: Optional[Callable[[object], None]] = None,
-        on_error: Optional[Callable[[BaseException], None]] = None,
-        marks_provider: Optional[Callable[[], Mapping[str, float]]] = None,
+        on_trip: Callable[[object], None] | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+        marks_provider: Callable[[], Mapping[str, float]] | None = None,
     ) -> None:
         self.engine = engine
         self.broker = broker
@@ -70,8 +73,15 @@ class RiskMonitor:
         self.marks_provider = marks_provider
 
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._handled_trip = False
+        self._thread: threading.Thread | None = None
+        # 从引擎当前状态播种,而不是硬编码 False:如果 engine 配了 state_store 并在
+        # 构造时从存档恢复出"熔断已触发",说明这次触发发生在**之前的进程**里
+        # (可能已经被那次进程的 monitor 处理/平过仓了)。新建的 monitor 若无条件从
+        # False 开始,会在重启后的第一个 tick 把 on_trip/自动平仓重新打一遍
+        # ——对已经空仓的头寸是多余的噪音,对操作者手动重新开的对冲仓则是一次
+        # 未经确认的强制平仓。播种为"已触发即视为已处理",只有**这个进程存活期间
+        # 发生的新触发**(False→True 的转变)才会再次拉响。
+        self._handled_trip = bool(getattr(engine, "breaker_tripped", False))
         self._lifecycle_lock = threading.RLock()
         # 串行化 _tick:守护线程与外部手动调用(或重叠的 tick)不得并发进入,
         # 否则 _handled_trip 的"检查-置位"非原子,会导致重复平仓或漏平。
@@ -80,7 +90,7 @@ class RiskMonitor:
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
-    def start(self) -> "RiskMonitor":
+    def start(self) -> RiskMonitor:
         """启动后台线程(幂等:已在运行则原样返回)。"""
         with self._lifecycle_lock:
             if self._thread is not None and self._thread.is_alive():
@@ -94,7 +104,7 @@ class RiskMonitor:
             self._thread.start()
             return self
 
-    def stop(self, timeout: Optional[float] = None) -> None:
+    def stop(self, timeout: float | None = None) -> None:
         """请求停止并等待线程退出。
 
         设置停止事件唤醒正在休眠的线程,再 join(可选超时)。
@@ -112,7 +122,7 @@ class RiskMonitor:
             return self._thread is not None and self._thread.is_alive()
 
     # ---- 上下文管理器 ----
-    def __enter__(self) -> "RiskMonitor":
+    def __enter__(self) -> RiskMonitor:
         self.start()
         return self
 

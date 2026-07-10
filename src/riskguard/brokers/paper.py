@@ -10,8 +10,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Mapping, Optional, Sequence
 
 from ..exceptions import BrokerError
 from ..models import Account, Order, Portfolio, Position
@@ -57,7 +57,7 @@ class PaperBroker(Broker):
         slippage_bps: float = 0.0,
         commission_per_share: float = 0.0,
         commission_bps: float = 0.0,
-        marks: Optional[Mapping[str, float]] = None,
+        marks: Mapping[str, float] | None = None,
     ) -> None:
         if cash < 0:
             raise ValueError(f"initial cash must be >= 0, got {cash}")
@@ -102,7 +102,7 @@ class PaperBroker(Broker):
         with self._lock:
             return {s: self._marks[s] for s in symbols if s in self._marks}
 
-    def get_portfolio(self, marks: Optional[Mapping[str, float]] = None) -> Portfolio:
+    def get_portfolio(self, marks: Mapping[str, float] | None = None) -> Portfolio:
         """组装组合快照。与基类不同,这里带上**全部已知标记价**(含尚无持仓的标的),
         这样风控在为一笔新标的的订单计价时也拿得到价格。"""
         with self._lock:

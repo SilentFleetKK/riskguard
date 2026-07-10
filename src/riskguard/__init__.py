@@ -26,6 +26,7 @@ from .exceptions import (
     CircuitBreakerTripped,
     ConfigError,
     OrderRejected,
+    PersistenceError,
     PriceUnavailable,
     RiskGuardError,
 )
@@ -42,6 +43,7 @@ from .models import (
     Signal,
 )
 from .monitor import RiskMonitor
+from .persistence import SqliteStateStore, StateStore
 from .presets import AGGRESSIVE, BALANCED, CONSERVATIVE, PRESETS, get_preset
 from .rules import (
     DrawdownCircuitBreaker,
@@ -61,7 +63,7 @@ from .sizing import (
 )
 from .state import RiskState
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "__version__",
@@ -70,6 +72,9 @@ __all__ = [
     "RiskConfig",
     "DEFAULT_CONFIG",
     "RiskState",
+    # 状态持久化
+    "StateStore",
+    "SqliteStateStore",
     # 配置预设
     "CONSERVATIVE",
     "BALANCED",
@@ -120,4 +125,5 @@ __all__ = [
     "CircuitBreakerTripped",
     "OrderRejected",
     "BrokerError",
+    "PersistenceError",
 ]

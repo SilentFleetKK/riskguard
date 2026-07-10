@@ -44,3 +44,11 @@ class OrderRejected(RiskGuardError):
 
 class BrokerError(RiskGuardError):
     """券商适配器层的错误(下单失败、连接异常、依赖缺失等)。"""
+
+
+class PersistenceError(RiskGuardError):
+    """状态持久化后端的错误(存档损坏、无法反序列化等)。
+
+    :class:`~riskguard.persistence.StateStore` 读档失败必须抛出它而不是静默返回
+    ``None``——一次读档失败若被误当成"首次启动",熔断状态就会悄悄丢失,
+    这正是持久化本要堵住的后门。"""

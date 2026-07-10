@@ -8,10 +8,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Mapping, Optional
 
 
 def _freeze(m: Mapping[str, datetime]) -> Mapping[str, datetime]:
@@ -31,7 +31,7 @@ class RiskState:
     breaker_tripped: bool = False
     """总亏损熔断是否已触发。"""
 
-    tripped_at: Optional[datetime] = None
+    tripped_at: datetime | None = None
     """熔断触发时间。"""
 
     trip_reason: str = ""
@@ -52,7 +52,7 @@ class RiskState:
         return max(0.0, 1.0 - self.last_equity / self.high_water_mark)
 
     # ---- 不可变更新 ----
-    def observe_equity(self, equity: float, now: datetime) -> "RiskState":
+    def observe_equity(self, equity: float, now: datetime) -> RiskState:
         """观测一笔新的权益值,返回更新了 last_equity / 高点的新状态。
 
         **坏读数防御**:NaN / ±inf 的权益(feed 抖动、除零、坏 tick)会被直接**忽略**,
@@ -65,13 +65,13 @@ class RiskState:
         hwm = max(self.high_water_mark, equity)
         return replace(self, high_water_mark=hwm, last_equity=equity)
 
-    def trip(self, reason: str, now: datetime) -> "RiskState":
+    def trip(self, reason: str, now: datetime) -> RiskState:
         """触发熔断,返回新状态(幂等:已触发则原样返回)。"""
         if self.breaker_tripped:
             return self
         return replace(self, breaker_tripped=True, tripped_at=now, trip_reason=reason)
 
-    def reset_breaker(self, now: datetime) -> "RiskState":
+    def reset_breaker(self, now: datetime) -> RiskState:
         """人工复盘后重置熔断,并把高点重置到当前权益,避免立刻二次触发。"""
         return replace(
             self,
@@ -81,7 +81,7 @@ class RiskState:
             high_water_mark=self.last_equity,
         )
 
-    def register_strategy(self, strategy_id: str, now: datetime) -> "RiskState":
+    def register_strategy(self, strategy_id: str, now: datetime) -> RiskState:
         """登记一个策略的入役时间;已存在则不覆盖(保留最早时间)。"""
         if strategy_id in self.strategy_inception:
             return self
@@ -89,7 +89,7 @@ class RiskState:
         merged[strategy_id] = now
         return replace(self, strategy_inception=merged)
 
-    def strategy_age_days(self, strategy_id: str, now: datetime) -> Optional[float]:
+    def strategy_age_days(self, strategy_id: str, now: datetime) -> float | None:
         """策略入役至今的天数;未登记返回 None。"""
         inception = self.strategy_inception.get(strategy_id)
         if inception is None:
@@ -97,6 +97,6 @@ class RiskState:
         return (now - inception).total_seconds() / 86400.0
 
     @classmethod
-    def initial(cls, equity: float = 0.0, now: Optional[datetime] = None) -> "RiskState":
+    def initial(cls, equity: float = 0.0, now: datetime | None = None) -> RiskState:
         """用初始权益构造起始状态,高点即为初始权益。"""
         return cls(high_water_mark=equity, last_equity=equity)

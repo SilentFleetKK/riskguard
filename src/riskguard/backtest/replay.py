@@ -9,13 +9,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Optional, Sequence
 
+from ..brokers.paper import PaperBroker
 from ..config import RiskConfig
 from ..engine import RiskEngine
 from ..models import Order, Side
-from ..brokers.paper import PaperBroker
 from .overlay import RiskOverlay
 
 _EPS = 1e-9
@@ -52,7 +52,7 @@ def replay(
     *,
     symbol: str = "ASSET",
     cash: float = 100_000.0,
-    config: Optional[RiskConfig] = None,
+    config: RiskConfig | None = None,
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
     risk_managed: bool = True,
@@ -71,7 +71,7 @@ def replay(
         slippage_bps=slippage_bps,
         commission_bps=commission_bps,
     )
-    overlay: Optional[RiskOverlay] = None
+    overlay: RiskOverlay | None = None
     if risk_managed:
         engine = RiskEngine(config or RiskConfig(), broker=broker)
         overlay = RiskOverlay(engine=engine, symbol=symbol)
@@ -123,7 +123,7 @@ def compare(
 
 def _naive_order(
     symbol: str, target_weight: float, price: float, broker: PaperBroker
-) -> Optional[Order]:
+) -> Order | None:
     """裸执行(无风控)基线:目标权重 → 差额订单,**仅受现金约束**(不加杠杆)。
 
     注意:买单按可用现金封顶,因此当已有未实现盈亏、权益偏离现金时,满仓目标会被

@@ -10,8 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 from ..config import RiskConfig
 from ..engine import RiskEngine
@@ -24,8 +23,8 @@ _EPS = 1e-9
 class OverlayResult:
     """一次"目标 → 订单"翻译的结果。"""
 
-    order: Optional[Order]  # 风控批准/缩量后的下一步订单;None = 本 bar 不动作
-    decision: Optional[RiskDecision]
+    order: Order | None  # 风控批准/缩量后的下一步订单;None = 本 bar 不动作
+    decision: RiskDecision | None
     halted: bool  # 熔断中,想要的新增/加仓被拦下
     approved_weight: float = 0.0  # 批准后应持有的权重(供按权重再平衡的框架直接用)
 
@@ -49,9 +48,9 @@ class RiskOverlay:
 
     def __init__(
         self,
-        config: Optional[RiskConfig] = None,
+        config: RiskConfig | None = None,
         *,
-        engine: Optional[RiskEngine] = None,
+        engine: RiskEngine | None = None,
         symbol: str = "ASSET",
     ) -> None:
         self.engine = engine if engine is not None else RiskEngine(config or RiskConfig())

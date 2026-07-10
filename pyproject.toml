@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "riskguard"
-version = "1.2.0"
+version = "1.3.0"
 description = "券商无关的开源交易风控层:仓位上限、总亏损熔断、动态仓位、审计追溯与实时监控守护。"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -50,9 +50,9 @@ all = ["riskguard[alpaca,backtesting,vectorbt,dev]"]
 riskguard = "riskguard.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/riskguard/riskguard"
-Documentation = "https://github.com/riskguard/riskguard#readme"
-Issues = "https://github.com/riskguard/riskguard/issues"
+Homepage = "https://github.com/SilentFleetKK/riskguard"
+Documentation = "https://github.com/SilentFleetKK/riskguard#readme"
+Issues = "https://github.com/SilentFleetKK/riskguard/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/riskguard"]
@@ -67,6 +67,9 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B027: AuditSink.close() 是有意义的默认空实现(资源清理钩子,非强制契约),
+# 不应被要求标 @abstractmethod。
+ignore = ["B027"]
 
 [tool.mypy]
 python_version = "3.10"

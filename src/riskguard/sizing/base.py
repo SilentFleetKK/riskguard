@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from ..config import RiskConfig
 from ..models import Order, OrderType, Portfolio, Signal
@@ -30,7 +29,7 @@ class PositionSizer(ABC):
 
     def size(
         self, signal: Signal, portfolio: Portfolio, config: RiskConfig
-    ) -> Optional[Order]:
+    ) -> Order | None:
         """把信号换算成订单;权重会被夹在 ``[0, max_sizing_leverage]``。
 
         当目标权重/数量收敛到 0(例如 Kelly 判定"无正期望,不下注")时,返回

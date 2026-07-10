@@ -15,7 +15,6 @@ import json
 import sqlite3
 import threading
 from datetime import datetime
-from typing import Optional, Union
 
 from .base import AuditEvent, AuditSink
 from .jsonl import _GENESIS, _canonical, _chain_digest, _coerce_key
@@ -42,14 +41,14 @@ class SqliteAuditSink(AuditSink):
         path: str,
         *,
         table: str = "audit_events",
-        hmac_key: Optional[Union[str, bytes]] = None,
+        hmac_key: str | bytes | None = None,
     ) -> None:
         self.path = path
         self.table = _safe_table(table)
         self._hmac_key = _coerce_key(hmac_key)
         self._lock = threading.RLock()
         # check_same_thread=False:允许跨线程调用;所有写操作自身用 RLock 串行化。
-        self._conn: Optional[sqlite3.Connection] = sqlite3.connect(
+        self._conn: sqlite3.Connection | None = sqlite3.connect(
             path, check_same_thread=False
         )
         with self._lock:
@@ -114,8 +113,8 @@ class SqliteAuditSink(AuditSink):
         path: str,
         table: str = "audit_events",
         *,
-        hmac_key: Optional[Union[str, bytes]] = None,
-        expected_count: Optional[int] = None,
+        hmac_key: str | bytes | None = None,
+        expected_count: int | None = None,
     ) -> bool:
         """独立校验哈希链完好性,语义与 :meth:`JsonlAuditSink.verify` 一致。
 

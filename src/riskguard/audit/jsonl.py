@@ -24,21 +24,20 @@ import hmac
 import json
 import os
 import threading
-from typing import Optional, Union
 
 from .base import AuditEvent, AuditSink
 
 _GENESIS = "0" * 64
 
 
-def _coerce_key(hmac_key: Optional[Union[str, bytes]]) -> Optional[bytes]:
+def _coerce_key(hmac_key: str | bytes | None) -> bytes | None:
     """把字符串密钥统一成 bytes;None 表示不启用 HMAC(退化为纯哈希链)。"""
     if hmac_key is None:
         return None
     return hmac_key if isinstance(hmac_key, bytes) else str(hmac_key).encode("utf-8")
 
 
-def _chain_digest(prev_hash: str, body: str, hmac_key: Optional[bytes]) -> str:
+def _chain_digest(prev_hash: str, body: str, hmac_key: bytes | None) -> str:
     """链式摘要:有密钥用 HMAC-SHA256(防伪),无密钥退化为 SHA-256(仅防中间篡改)。"""
     data = (prev_hash + body).encode("utf-8")
     if hmac_key is not None:
@@ -83,7 +82,7 @@ class JsonlAuditSink(AuditSink):
         path: str,
         *,
         fsync: bool = False,
-        hmac_key: Optional[Union[str, bytes]] = None,
+        hmac_key: str | bytes | None = None,
     ) -> None:
         self.path = path
         self._fsync = fsync
@@ -101,7 +100,7 @@ class JsonlAuditSink(AuditSink):
             return 0, _GENESIS
         last_seq = 0
         last_hash = _GENESIS
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -143,8 +142,8 @@ class JsonlAuditSink(AuditSink):
     def verify(
         path: str,
         *,
-        hmac_key: Optional[Union[str, bytes]] = None,
-        expected_count: Optional[int] = None,
+        hmac_key: str | bytes | None = None,
+        expected_count: int | None = None,
     ) -> bool:
         """独立校验哈希链完好性,返回布尔而非抛异常。
 
@@ -163,7 +162,7 @@ class JsonlAuditSink(AuditSink):
         key = _coerce_key(hmac_key)
         prev = _GENESIS
         last_seq = 0
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:

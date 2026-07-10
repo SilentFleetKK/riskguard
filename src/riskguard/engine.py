@@ -9,14 +9,15 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-from typing import Callable, Optional, Sequence
 
 from .audit.base import AuditSink
 from .brokers.base import Broker, BrokerOrder
 from .config import DEFAULT_CONFIG, RiskConfig
 from .exceptions import BrokerError, OrderRejected
 from .models import Decision, Order, Portfolio, RiskDecision, RuleResult, Signal
+from .persistence import StateStore
 from .rules.base import RiskRule, RuleContext
 from .sizing.base import PositionSizer
 from .state import RiskState
@@ -42,24 +43,46 @@ class RiskEngine:
         可选的执行后端;不配则 :meth:`submit` 会报错(仅能用 :meth:`check`)。
     audit:
         可选的审计后端;每次裁决/熔断/成交都会落一条记录。
+    state:
+        初始状态;仅在 ``state_store`` 未配置、或 ``state_store`` 里还没有存档时生效
+        (存档存在则存档优先——这是"重启后恢复"的关键)。缺省从零开始。
+    state_store:
+        可选的状态持久化后端。配置后,构造时**自动从存档恢复**高水位/熔断/策略入役
+        时间,此后每次状态变更都会写透;进程重启、甚至换一台机器,只要连到同一个
+        store,熔断状态都不会丢——堵住"重启就能绕过风控"的后门。存档读取失败会
+        **直接抛出**,拒绝以"一切正常"的假象启动。**一个 store/key 只能有一个活跃
+        引擎**,共用会被乐观锁检测到并报错(见 :mod:`riskguard.persistence`),但不会
+        静默互相覆盖。⚠️ 配置后,:meth:`check`/:meth:`update_equity` 等方法会在**持锁期间**
+        做一次同步磁盘写(sqlite commit),把它们的延迟画像从"纯内存、微秒级"变成
+        "阻塞式磁盘 IO、且串行化所有并发调用者"——这是刻意的正确性取舍(与
+        :meth:`submit` 锁内做券商网络 IO 同一哲学),高频调用场景请预留 IO 延迟预算。
     raise_on_reject:
         为 True 时,:meth:`submit` 遇到拒单抛 :class:`OrderRejected`;默认返回 None。
     clock:
         时间源,便于测试注入;默认 UTC now(返回带时区的 datetime)。
+    on_persist_error:
+        状态持久化写入失败时的回调,签名 ``on_persist_error(exc)``;缺省静默忽略。
+        写失败不阻断风控裁决,但意味着重启保护暂时失效——生产环境建议务必设置并对它
+        告警。⚠️ 该回调在引擎锁**持有期间同步执行**,必须快、不能阻塞、不能派生新
+        线程再回调本引擎(会被同一把锁堵住,直到外层调用返回才能获得锁)。例外:
+        :meth:`reset_breaker` 的持久化失败**不会**走这个回调,而是直接向调用方抛出
+        ——见该方法文档。
     """
 
     def __init__(
         self,
         config: RiskConfig = DEFAULT_CONFIG,
-        rules: Optional[Sequence[RiskRule]] = None,
+        rules: Sequence[RiskRule] | None = None,
         *,
-        sizer: Optional[PositionSizer] = None,
-        broker: Optional[Broker] = None,
-        audit: Optional[AuditSink] = None,
-        state: Optional[RiskState] = None,
+        sizer: PositionSizer | None = None,
+        broker: Broker | None = None,
+        audit: AuditSink | None = None,
+        state: RiskState | None = None,
+        state_store: StateStore | None = None,
         raise_on_reject: bool = False,
         clock: Callable[[], datetime] = _utc_now,
-        on_audit_error: Optional[Callable[[BaseException], None]] = None,
+        on_audit_error: Callable[[BaseException], None] | None = None,
+        on_persist_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         self.config = config
         if rules is None:
@@ -71,10 +94,20 @@ class RiskEngine:
         self.broker = broker
         self.audit = audit
         self.on_audit_error = on_audit_error
+        self.state_store = state_store
+        self.on_persist_error = on_persist_error
         self.raise_on_reject = raise_on_reject
         self._clock = clock
-        self._state = state if state is not None else RiskState.initial()
+
+        restored = state_store.load() if state_store is not None else None
+        self._state = restored if restored is not None else (state or RiskState.initial())
         self._lock = threading.RLock()
+
+        if state_store is not None and restored is None:
+            # 首次启动、存档还是空的:立刻落盘一次,让存档行在构造完成后就存在,
+            # 而不是要等到第一次 check()/update_equity() 才出现——外部工具轮询
+            # 这个文件时不该看到"引擎已经启动但存档还没有这一行"的空窗期。
+            self._persist_locked()
 
     # ------------------------------------------------------------------
     # 状态访问
@@ -94,6 +127,7 @@ class RiskEngine:
         """显式登记策略入役时间(隔离观察期从此刻算起)。"""
         with self._lock:
             self._state = self._state.register_strategy(strategy_id, self._clock())
+            self._persist_locked()
 
     # ------------------------------------------------------------------
     # 核心:预交易检查
@@ -120,10 +154,11 @@ class RiskEngine:
             )
             results = tuple(rule.evaluate(ctx) for rule in self.rules)
             decision = self._aggregate(order, results, now)
+            self._persist_locked()
             self._safe_audit(lambda a: a.record_decision(decision))
             return decision
 
-    def submit(self, order: Order, portfolio: Portfolio) -> Optional[BrokerOrder]:
+    def submit(self, order: Order, portfolio: Portfolio) -> BrokerOrder | None:
         """先风控、放行则下单。返回券商回执;被拒返回 None(或抛异常)。
 
         风控检查与向 broker 提交在**同一把锁**内完成,不给监控守护线程留下"检查时
@@ -157,7 +192,7 @@ class RiskEngine:
 
     def size_and_submit(
         self, signal: Signal, portfolio: Portfolio
-    ) -> Optional[BrokerOrder]:
+    ) -> BrokerOrder | None:
         """用配置的仓位算法把信号换算成订单,再走 :meth:`submit`。
 
         若仓位算法判定"不下注"(:meth:`PositionSizer.size` 返回 ``None``,如 Kelly
@@ -180,14 +215,27 @@ class RiskEngine:
         """
         with self._lock:
             self._observe_locked(portfolio, self._clock())
+            self._persist_locked()
             return self._state
 
     def reset_breaker(self) -> RiskState:
-        """人工复盘后重置熔断,并把权益高点归位到当前权益。"""
+        """人工复盘后重置熔断,并把权益高点归位到当前权益。
+
+        与其它状态变更方法不同,这里是**先落盘、成功后才切换内存状态**(其余方法
+        是先切内存、再尽力落盘)。原因:重置是操作者据以判断"可以恢复交易"的决定
+        性动作;如果落盘悄悄失败却假装重置成功,操作者会带着虚假的安全感继续交易,
+        进程一重启熔断状态又原样复活——这比"重置失败、留在熔断态"危险得多。因此
+        本方法的持久化失败**不会**转交 ``on_persist_error``,而是直接向调用方抛出
+        存储层异常(通常是 :class:`~riskguard.exceptions.PersistenceError`),重置
+        不生效,熔断继续保持——这是刻意的 fail-closed。
+        """
         with self._lock:
             now = self._clock()
             was_tripped = self._state.breaker_tripped
-            self._state = self._state.reset_breaker(now)
+            new_state = self._state.reset_breaker(now)
+            if self.state_store is not None:
+                self.state_store.save(new_state)  # 失败则直接抛出,不切换内存状态
+            self._state = new_state
             if was_tripped:
                 self._safe_audit(
                     lambda a: a.record_event(
@@ -199,7 +247,7 @@ class RiskEngine:
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
-    def _safe_audit(self, action: "Callable[[AuditSink], None]") -> None:
+    def _safe_audit(self, action: Callable[[AuditSink], None]) -> None:
         """执行一次审计写入,**绝不让审计失败阻断风控裁决**。
 
         审计是次要职责:磁盘满、IO 异常等绝不能把 allow/deny 的主判决带崩。失败时
@@ -214,6 +262,24 @@ class RiskEngine:
             if self.on_audit_error is not None:
                 try:
                     self.on_audit_error(e)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _persist_locked(self) -> None:
+        """把当前状态写透到持久化后端。调用方须已持锁,确保存档与内存状态一致。
+
+        写入失败**不阻断风控裁决**(转交 ``on_persist_error``),否则磁盘抖动会变成
+        新的拒绝服务面——但这也意味着写失败期间"重启即绕过熔断"的保护暂时失效。
+        """
+        store = self.state_store
+        if store is None:
+            return
+        try:
+            store.save(self._state)
+        except Exception as e:  # noqa: BLE001 —— 持久化失败不得中断风控
+            if self.on_persist_error is not None:
+                try:
+                    self.on_persist_error(e)
                 except Exception:  # noqa: BLE001
                     pass
 

@@ -11,13 +11,13 @@ vectorbt 是向量化回测框架。RiskGuard 在这里提供两类东西:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 from ..config import RiskConfig
 
 
 def risk_capped_weights(
-    target_weights: Sequence[float], config: Optional[RiskConfig] = None
+    target_weights: Sequence[float], config: RiskConfig | None = None
 ) -> list[float]:
     """把每个目标权重的**幅度**封顶在 ``max_position_pct`` 以内(保留方向符号)。"""
     cfg = config or RiskConfig()
@@ -28,7 +28,7 @@ def risk_capped_weights(
 def kelly_weights(
     win_prob: Sequence[float],
     payoff_ratio: Sequence[float],
-    config: Optional[RiskConfig] = None,
+    config: RiskConfig | None = None,
 ) -> list[float]:
     """由逐点胜率 p 与盈亏比 b 算分数 Kelly 权重 ``f = kelly_fraction·(bp−q)/b``,并封顶。
 
@@ -39,7 +39,8 @@ def kelly_weights(
     """
     cfg = config or RiskConfig()
     out: list[float] = []
-    for p, b in zip(win_prob, payoff_ratio):
+    # strict=True:长度不一致时报错,而不是静默截断到较短序列——那会悄悄丢点。
+    for p, b in zip(win_prob, payoff_ratio, strict=True):
         p = float(p)
         b = float(b)
         if b <= 0.0 or not (0.0 <= p <= 1.0):
@@ -66,7 +67,7 @@ def from_signals_with_risk(
     entries,
     exits,
     *,
-    config: Optional[RiskConfig] = None,
+    config: RiskConfig | None = None,
     **kwargs: object,
 ):
     """跑 ``vbt.Portfolio.from_signals``,单笔目标仓位按 ``max_position_pct`` 封顶。

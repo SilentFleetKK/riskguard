@@ -8,10 +8,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Mapping, Optional
 
 from ..models import RiskDecision
 
@@ -72,7 +72,7 @@ class AuditSink(ABC):
     def close(self) -> None:
         """释放资源(文件句柄、数据库连接)。默认无操作。"""
 
-    def __enter__(self) -> "AuditSink":
+    def __enter__(self) -> AuditSink:
         return self
 
     def __exit__(self, *exc: object) -> None:

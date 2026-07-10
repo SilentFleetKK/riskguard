@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from ..models import Portfolio, RuleResult, resolve_price
+from ..models import RuleResult, resolve_price
 from ._projection import allowed_quantity, project, within
 from .base import RiskRule, RuleContext
 
