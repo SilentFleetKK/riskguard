@@ -486,3 +486,123 @@ def test_engine_state_returns_immutable_snapshot():
     snap = engine.state
     with pytest.raises((AttributeError, TypeError)):
         snap.last_equity = 0.0  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# AI 代理闸门:交易日会话 / 日内亏损线 / 订单节流状态
+# --------------------------------------------------------------------------- #
+
+def test_new_ai_gate_fields_default_empty():
+    s = RiskState.initial(100_000.0)
+    assert s.session_date is None
+    assert s.session_anchor_equity == 0.0
+    assert s.daily_tripped is False
+    assert s.daily_tripped_at is None
+    assert s.daily_trip_reason == ""
+    assert s.recent_orders == ()
+
+
+def test_session_key_for_boundary_midnight():
+    from riskguard.state import session_key_for
+
+    d0 = datetime(2024, 3, 5, 0, 0, tzinfo=timezone.utc)
+    d1 = datetime(2024, 3, 5, 23, 59, tzinfo=timezone.utc)
+    assert session_key_for(d0, "00:00") == "2024-03-05"
+    assert session_key_for(d1, "00:00") == "2024-03-05"
+
+
+def test_session_key_for_custom_boundary():
+    """17:00 UTC 换日:16:59 仍属"昨天开始的会话",17:00 起属新会话。"""
+    from riskguard.state import session_key_for
+
+    before = datetime(2024, 3, 5, 16, 59, tzinfo=timezone.utc)
+    after = datetime(2024, 3, 5, 17, 0, tzinfo=timezone.utc)
+    assert session_key_for(before, "17:00") == "2024-03-04"
+    assert session_key_for(after, "17:00") == "2024-03-05"
+
+
+def test_roll_session_anchors_equity_and_clears_daily_trip():
+    s = RiskState.initial(100_000.0).trip_daily("bad day", T0)
+    assert s.daily_tripped
+    rolled = s.roll_session("2024-01-02", 97_000.0)
+    assert rolled.session_date == "2024-01-02"
+    assert rolled.session_anchor_equity == 97_000.0
+    assert rolled.daily_tripped is False
+    assert rolled.daily_tripped_at is None
+    assert rolled.daily_trip_reason == ""
+    # 原对象不可变
+    assert s.daily_tripped is True
+
+
+def test_trip_daily_is_idempotent_keeps_first():
+    s = RiskState.initial(100_000.0).trip_daily("first", T0)
+    s2 = s.trip_daily("second", _at(0.1))
+    assert s2.daily_trip_reason == "first"
+    assert s2.daily_tripped_at == T0
+
+
+def test_daily_loss_property():
+    s = RiskState.initial(100_000.0).roll_session("2024-01-01", 100_000.0)
+    s = s.observe_equity(97_000.0, T0)
+    assert s.daily_loss == pytest.approx(0.03)
+    # 盈利日不算亏损
+    up = s.observe_equity(103_000.0, T0)
+    assert up.daily_loss == 0.0
+    # 未锚定(anchor<=0)时恒为 0
+    assert RiskState.initial(0.0).daily_loss == 0.0
+
+
+def test_record_order_appends_and_prunes():
+    s = RiskState.initial(100_000.0)
+    window = timedelta(hours=1)
+    s = s.record_order(T0, False, keep_window=window, max_len=100)
+    s = s.record_order(_at(0.01), True, keep_window=window, max_len=100)
+    assert len(s.recent_orders) == 2
+    # 两小时后再记一单:窗口外的旧记录被修剪
+    s = s.record_order(_at(0.1), False, keep_window=window, max_len=100)
+    assert len(s.recent_orders) == 1
+
+
+def test_record_order_enforces_max_len():
+    s = RiskState.initial(100_000.0)
+    for i in range(10):
+        s = s.record_order(T0 + timedelta(seconds=i), False,
+                           keep_window=timedelta(days=1), max_len=5)
+    assert len(s.recent_orders) == 5
+    # 保留的是最新的 5 条
+    assert s.recent_orders[0][0] == T0 + timedelta(seconds=5)
+
+
+def test_orders_in_window_counts_by_bucket():
+    s = RiskState.initial(100_000.0)
+    kw = dict(keep_window=timedelta(hours=1), max_len=100)
+    s = s.record_order(T0, False, **kw)
+    s = s.record_order(T0 + timedelta(seconds=10), False, **kw)
+    s = s.record_order(T0 + timedelta(seconds=20), True, **kw)
+    now = T0 + timedelta(seconds=30)
+    assert s.orders_in_window(now, timedelta(minutes=1)) == 3
+    assert s.orders_in_window(now, timedelta(minutes=1), reduce_only=False) == 2
+    assert s.orders_in_window(now, timedelta(minutes=1), reduce_only=True) == 1
+    # 窗口滑走
+    later = T0 + timedelta(minutes=5)
+    assert s.orders_in_window(later, timedelta(minutes=1)) == 0
+
+
+def test_reset_breaker_does_not_clear_daily_trip():
+    """总熔断复位不清日内线:"今天到此为止"只随换日(或人工显式覆盖)解除。"""
+    s = RiskState.initial(100_000.0).trip_daily("daily", T0).trip("total", T0)
+    s2 = s.reset_breaker(_at(1))
+    assert s2.breaker_tripped is False
+    assert s2.daily_tripped is True
+
+
+def test_session_key_for_treats_naive_datetime_as_utc():
+    """注入 datetime.utcnow() 这类 naive 时钟时,绝不能按宿主机本地时区解释——
+    那会让会话边界漂移、把已触发的日内熔断在换日之外静默清掉(fail-open)。
+    库的其余部分对 naive datetime 都是"当 UTC 用",这里必须一致。"""
+    from riskguard.state import session_key_for
+
+    aware = datetime(2024, 3, 5, 23, 0, tzinfo=timezone.utc)
+    naive = datetime(2024, 3, 5, 23, 0)  # 意图是 UTC,但没带 tzinfo
+    assert session_key_for(naive, "00:00") == session_key_for(aware, "00:00")
+    assert session_key_for(naive, "17:00") == session_key_for(aware, "17:00")

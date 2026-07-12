@@ -502,3 +502,105 @@ def test_fresh_engine_persists_immediately_on_construction(tmp_path):
     assert verifier.load() is not None  # 存档行已经存在,不用等第一次 check()
     verifier.close()
     store.close()
+
+
+# --------------------------------------------------------------------------- #
+# schema v2:AI 代理闸门字段的持久化与向后兼容
+# --------------------------------------------------------------------------- #
+
+def _write_raw_payload(path: str, payload: str) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE risk_state SET payload = ?", (payload,))
+    conn.commit()
+    conn.close()
+
+
+def test_v1_payload_without_new_keys_loads_with_defaults(tmp_path):
+    """v1.4 存档(没有 schema 键、没有新字段)必须无损加载——这就是迁移。"""
+    path = str(tmp_path / "s.db")
+    store = SqliteStateStore(path)
+    store.save(RiskState.initial(100.0))
+    store.close()
+
+    v1_payload = (
+        '{"high_water_mark": 120000.0, "last_equity": 110000.0,'
+        ' "breaker_tripped": true, "tripped_at": "2024-01-01T00:00:00+00:00",'
+        ' "trip_reason": "drawdown", "strategy_inception": {}}'
+    )
+    _write_raw_payload(path, v1_payload)
+
+    store2 = SqliteStateStore(path)
+    loaded = store2.load()
+    store2.close()
+    assert loaded is not None
+    assert loaded.high_water_mark == 120000.0
+    assert loaded.breaker_tripped is True
+    # 新字段全部取 dataclass 默认值
+    assert loaded.session_date is None
+    assert loaded.session_anchor_equity == 0.0
+    assert loaded.daily_tripped is False
+    assert loaded.recent_orders == ()
+
+
+def test_future_schema_is_rejected_fail_closed(tmp_path):
+    """schema 大于当前版本 → 拒读(半懂不懂地读一个未来格式比读不到更危险)。"""
+    path = str(tmp_path / "s.db")
+    store = SqliteStateStore(path)
+    store.save(RiskState.initial(100.0))
+    store.close()
+
+    future = (
+        '{"schema": 3, "high_water_mark": 1.0, "last_equity": 1.0,'
+        ' "breaker_tripped": false, "tripped_at": null, "trip_reason": "",'
+        ' "strategy_inception": {}}'
+    )
+    _write_raw_payload(path, future)
+
+    store2 = SqliteStateStore(path)
+    with pytest.raises(PersistenceError):
+        store2.load()
+    store2.close()
+
+
+def test_round_trip_preserves_ai_gate_fields(tmp_path):
+    from datetime import timedelta
+
+    t0 = datetime(2024, 3, 5, 12, 0, tzinfo=timezone.utc)
+    state = (
+        RiskState.initial(100_000.0)
+        .roll_session("2024-03-05", 100_000.0)
+        .observe_equity(96_000.0, t0)
+        .trip_daily("daily loss 4% >= 3%", t0)
+        .record_order(t0, False, keep_window=timedelta(hours=1), max_len=10)
+        .record_order(t0 + timedelta(seconds=5), True,
+                      keep_window=timedelta(hours=1), max_len=10)
+    )
+    path = str(tmp_path / "s.db")
+    store = SqliteStateStore(path)
+    store.save(state)
+    store.close()
+
+    store2 = SqliteStateStore(path)
+    loaded = store2.load()
+    store2.close()
+    assert loaded is not None
+    assert loaded.session_date == "2024-03-05"
+    assert loaded.session_anchor_equity == 100_000.0
+    assert loaded.daily_tripped is True
+    assert loaded.daily_tripped_at == t0
+    assert loaded.daily_trip_reason == "daily loss 4% >= 3%"
+    assert loaded.recent_orders == state.recent_orders
+
+
+def test_save_rejects_non_finite_session_anchor(tmp_path):
+    import dataclasses
+
+    state = dataclasses.replace(
+        RiskState.initial(100.0), session_anchor_equity=float("nan")
+    )
+    store = SqliteStateStore(str(tmp_path / "s.db"))
+    with pytest.raises(PersistenceError):
+        store.save(state)
+    store.close()
