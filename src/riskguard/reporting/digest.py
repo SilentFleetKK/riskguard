@@ -69,6 +69,12 @@ class DigestReport:
     headroom_to_breaker: float  # max_drawdown_pct - drawdown;负数表示已经熔断
     breaker_tripped: bool
     trip_reason: str
+    max_daily_loss_pct: float | None
+    session_date: str | None
+    session_anchor_equity: float
+    daily_loss: float
+    daily_tripped: bool
+    daily_trip_reason: str
     gross_exposure_ratio: float
     max_gross_exposure_pct: float
     net_exposure_ratio: float
@@ -87,6 +93,12 @@ class DigestReport:
             "headroom_to_breaker": self.headroom_to_breaker,
             "breaker_tripped": self.breaker_tripped,
             "trip_reason": self.trip_reason,
+            "max_daily_loss_pct": self.max_daily_loss_pct,
+            "session_date": self.session_date,
+            "session_anchor_equity": self.session_anchor_equity,
+            "daily_loss": self.daily_loss,
+            "daily_tripped": self.daily_tripped,
+            "daily_trip_reason": self.daily_trip_reason,
             "gross_exposure_ratio": self.gross_exposure_ratio,
             "max_gross_exposure_pct": self.max_gross_exposure_pct,
             "net_exposure_ratio": self.net_exposure_ratio,
@@ -149,6 +161,12 @@ def build_digest(
         headroom_to_breaker=config.max_drawdown_pct - state.drawdown,
         breaker_tripped=state.breaker_tripped,
         trip_reason=state.trip_reason,
+        max_daily_loss_pct=config.max_daily_loss_pct,
+        session_date=state.session_date,
+        session_anchor_equity=state.session_anchor_equity,
+        daily_loss=state.daily_loss,
+        daily_tripped=state.daily_tripped,
+        daily_trip_reason=state.daily_trip_reason,
         gross_exposure_ratio=gross_ratio,
         max_gross_exposure_pct=config.max_gross_exposure_pct,
         net_exposure_ratio=net_ratio,
@@ -172,6 +190,16 @@ def render_text(report: DigestReport) -> str:
         lines.append(f"  熔断状态:  已触发 🔴  {report.trip_reason}")
     else:
         lines.append("  熔断状态:  正常 🟢")
+
+    if report.max_daily_loss_pct is not None:
+        headroom = report.max_daily_loss_pct - report.daily_loss
+        lines.append(
+            f"  日内亏损:  {report.daily_loss:.1%}  (日内线 "
+            f"{report.max_daily_loss_pct:.1%}, 距离 {headroom:.1%}, "
+            f"锚定 {report.session_anchor_equity:,.0f})"
+        )
+        if report.daily_tripped:
+            lines.append(f"  日内熔断:  已触发 🔴  {report.daily_trip_reason}")
 
     lines.append(
         f"  总敞口/权益: {report.gross_exposure_ratio:.1%}  "

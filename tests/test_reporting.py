@@ -489,3 +489,47 @@ def test_reporting_render_text_survives_infinite_weight():
     result = run_stress_test(engine, pf, -0.90)
     stress_text = render_stress_text(result)
     assert isinstance(stress_text, str) and len(stress_text) > 0
+
+
+# ---------------------------------------------------------------------------
+# 日内亏损线在日报中的呈现
+# ---------------------------------------------------------------------------
+def test_digest_includes_daily_loss_section():
+    from datetime import timedelta as _td
+
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    clock_now = [t0]
+    engine = RiskEngine(
+        RiskConfig(max_daily_loss_pct=0.03, max_drawdown_pct=0.50),
+        clock=lambda: clock_now[0],
+    )
+    engine.update_equity(_flat_portfolio(100_000.0))
+    clock_now[0] = t0 + _td(hours=1)
+    engine.update_equity(_flat_portfolio(98_000.0))
+
+    report = build_digest(engine, _flat_portfolio(98_000.0))
+    d = report.to_dict()
+    assert d["max_daily_loss_pct"] == 0.03
+    assert d["daily_loss"] == pytest.approx(0.02)
+    assert d["session_anchor_equity"] == 100_000.0
+    assert d["daily_tripped"] is False
+
+    text = render_digest_text(report)
+    assert "日内" in text
+
+
+def test_digest_shows_daily_trip():
+    engine = _make_engine(max_daily_loss_pct=0.03, max_drawdown_pct=0.50)
+    engine.update_equity(_flat_portfolio(100_000.0))
+    engine.update_equity(_flat_portfolio(95_000.0))
+    report = build_digest(engine, _flat_portfolio(95_000.0))
+    assert report.daily_tripped is True
+    assert "日内" in render_digest_text(report)
+
+
+def test_digest_daily_section_absent_when_disabled():
+    engine = _make_engine()  # 未启用日内线
+    engine.update_equity(_flat_portfolio(100_000.0))
+    report = build_digest(engine, _flat_portfolio(100_000.0))
+    assert report.max_daily_loss_pct is None
+    assert "日内" not in render_digest_text(report)

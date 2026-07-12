@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from . import __version__
 from .engine import RiskEngine
 from .exceptions import ConfigError, RiskGuardError
-from .models import Account, Order, Portfolio, Position, Side
+from .models import Account, Order, OrderType, Portfolio, Position, Side
 from .persistence import SqliteStateStore
 from .presets import PRESETS, get_preset
 
@@ -157,6 +157,10 @@ def cmd_presets(args: argparse.Namespace) -> int:
         ("净敞口上限", "max_net_exposure_pct"),
         ("Kelly 系数", "kelly_fraction"),
         ("隔离天数", "quarantine_days"),
+        ("日内亏损线", "max_daily_loss_pct"),
+        ("价格带(±)", "max_price_band_pct"),
+        ("每分钟订单", "max_orders_per_minute"),
+        ("每小时订单", "max_orders_per_hour"),
     ]
     names = ["conservative", "balanced", "aggressive"]
     header = f"{'参数':<14}" + "".join(f"{n:>16}" for n in names)
@@ -189,12 +193,22 @@ def cmd_check(args: argparse.Namespace) -> int:
             on_persist_error=_warn_persist_error if store is not None else None,
         )
         portfolio = _build_portfolio(args.equity, args.symbol, args.price, args.position)
-        order = Order(
-            symbol=args.symbol,
-            side=Side(args.side),
-            quantity=args.qty,
-            reduce_only=args.reduce_only,
-        )
+        if args.limit_price is not None:
+            order = Order(
+                symbol=args.symbol,
+                side=Side(args.side),
+                quantity=args.qty,
+                order_type=OrderType.LIMIT,
+                limit_price=args.limit_price,
+                reduce_only=args.reduce_only,
+            )
+        else:
+            order = Order(
+                symbol=args.symbol,
+                side=Side(args.side),
+                quantity=args.qty,
+                reduce_only=args.reduce_only,
+            )
         decision = engine.check(order, portfolio)
         equity = portfolio.equity
 
@@ -223,6 +237,58 @@ def cmd_check(args: argparse.Namespace) -> int:
     finally:
         if store is not None:
             store.close()
+
+
+def cmd_reset_breaker(args: argparse.Namespace) -> int:
+    """人工复位熔断——先打印当初为什么熔断,要求确认,再动手。
+
+    退出码:0 = 已复位;1 = 无可复位 / 操作者取消;2 = 错误(存档不存在等)。
+    复位刻意只做成需要人在终端上执行的动作——"不把原因想明白,不许重启"
+    不应该有自动化版本。
+    """
+    if not os.path.exists(args.state_db):
+        print(f"error: 存档不存在:{args.state_db}", file=sys.stderr)
+        return 2
+
+    store = SqliteStateStore(args.state_db, key=args.state_key)
+    try:
+        engine = RiskEngine(state_store=store)
+        state = engine.state
+        resettable = state.breaker_tripped or (args.include_daily and state.daily_tripped)
+        if not resettable:
+            if state.daily_tripped:
+                print(
+                    "总回撤熔断未触发;日内亏损熔断处于激活状态,但未传 --include-daily。\n"
+                    f"  日内熔断原因: {state.daily_trip_reason}\n"
+                    "日内线会在换日后自动复位;确要今天继续,请加 --include-daily 显式覆盖。"
+                )
+            else:
+                print("没有处于激活状态的熔断,无事可做。")
+            return 1
+
+        if state.breaker_tripped:
+            when = state.tripped_at.isoformat() if state.tripped_at else "unknown"
+            print(f"总回撤熔断:  {state.trip_reason}  (触发于 {when})")
+        if state.daily_tripped and args.include_daily:
+            when = state.daily_tripped_at.isoformat() if state.daily_tripped_at else "unknown"
+            print(f"日内熔断:    {state.daily_trip_reason}  (触发于 {when})")
+
+        if not args.yes:
+            print("\n复位前请确认已完成人工复盘——不把原因想明白,不许重启。")
+            try:
+                answer = input("确认复位?[y/N] ").strip().lower()
+            except EOFError:
+                answer = ""
+            if answer not in ("y", "yes"):
+                print("已取消,熔断保持原状。")
+                return 1
+
+        engine.reset_breaker(include_daily=args.include_daily)
+        print("已复位。高水位已归位到当前权益" +
+              (";日内锚定已重置。" if args.include_daily else "。"))
+        return 0
+    finally:
+        store.close()
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
@@ -266,7 +332,13 @@ def cmd_digest(args: argparse.Namespace) -> int:
         engine.update_equity(portfolio)  # 记录今天这一次观测,推进高水位历史
         report = build_digest(engine, portfolio)
         print(render_digest_text(report))
-        return 1 if report.breaker_tripped else 0
+        # 退出码向后兼容:1 的含义保持"总回撤熔断已触发"不变;仅日内亏损线
+        # 激活(总线安好)用新退出码 4,老脚本对 1 的既有理解不受影响。
+        if report.breaker_tripped:
+            return 1
+        if report.daily_tripped:
+            return 4
+        return 0
     finally:
         if store is not None:
             store.close()
@@ -378,7 +450,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--symbol", default="ASSET")
     sc.add_argument("--side", choices=["buy", "sell"], required=True)
     sc.add_argument("--qty", type=_positive_float, required=True, help="下单数量(幅度 >0)")
-    sc.add_argument("--price", type=_positive_float, required=True)
+    sc.add_argument("--price", type=_positive_float, required=True,
+                    help="参考价(mark);市价单据此估算敞口,限价单据此校验价格带")
+    sc.add_argument("--limit-price", type=_positive_float,
+                    help="传入则构造限价单:触发 fat-finger 价格带校验(偏离 --price 超带宽即拒)")
     sc.add_argument("--position", type=_finite_float, default=0.0, help="当前持仓(带符号)")
     sc.add_argument("--reduce-only", action="store_true")
     sc.add_argument(
@@ -393,6 +468,20 @@ def build_parser() -> argparse.ArgumentParser:
         "否则会互相覆盖对方的高水位/熔断状态(默认 'default')。",
     )
     sc.set_defaults(func=cmd_check)
+
+    srb = sub.add_parser(
+        "reset-breaker",
+        help="人工复盘后复位熔断(打印触发原因并要求确认)。",
+    )
+    srb.add_argument("--state-db", required=True, help="存放熔断状态的 SQLite 文件路径")
+    srb.add_argument("--state-key", default="default", help="见 check 子命令的说明")
+    srb.add_argument(
+        "--include-daily",
+        action="store_true",
+        help="同时清除日内亏损熔断(默认只清总回撤线;日内线通常应随换日自动复位)",
+    )
+    srb.add_argument("--yes", action="store_true", help="跳过交互确认(脚本用)")
+    srb.set_defaults(func=cmd_reset_breaker)
 
     sr = sub.add_parser("replay", help="买入持有:套风控 vs 不套 的回撤对比")
     sr.add_argument("--preset", default="balanced", choices=sorted(PRESETS))
