@@ -46,10 +46,13 @@ from .monitor import RiskMonitor
 from .persistence import SqliteStateStore, StateStore
 from .presets import AGGRESSIVE, BALANCED, CONSERVATIVE, PRESETS, get_preset
 from .rules import (
+    DailyLossLimit,
     DrawdownCircuitBreaker,
     GrossExposureLimit,
     MaxPositionLimit,
     NetExposureLimit,
+    OrderThrottle,
+    PriceBandRule,
     RiskRule,
     RuleContext,
     StrategyQuarantine,
@@ -96,7 +99,10 @@ __all__ = [
     "RiskRule",
     "RuleContext",
     "MaxPositionLimit",
+    "DailyLossLimit",
     "DrawdownCircuitBreaker",
+    "OrderThrottle",
+    "PriceBandRule",
     "GrossExposureLimit",
     "NetExposureLimit",
     "StrategyQuarantine",

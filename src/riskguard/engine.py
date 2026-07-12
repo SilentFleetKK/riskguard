@@ -8,19 +8,28 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from collections.abc import Callable, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .audit.base import AuditSink
 from .brokers.base import Broker, BrokerOrder
 from .config import DEFAULT_CONFIG, RiskConfig
-from .exceptions import BrokerError, OrderRejected
+from .exceptions import BrokerError, ConfigError, OrderRejected
 from .models import Decision, Order, Portfolio, RiskDecision, RuleResult, Signal
 from .persistence import StateStore
 from .rules.base import RiskRule, RuleContext
 from .sizing.base import PositionSizer
-from .state import RiskState
+from .state import RiskState, session_key_for
+
+#: 节流记录的修剪窗口:最长的节流统计窗口(1 小时),窗口外的记录对任何规则都
+#: 不再有意义,可以安全丢弃。
+_ORDER_KEEP_WINDOW = timedelta(hours=1)
+
+#: recent_orders 的硬长度上限兜底:即便配置了病态的大配额,状态与持久化 payload
+#: 也不会无限膨胀。取值远大于任何理性配置(小时配额 × 减仓放宽倍数)。
+_ORDER_HARD_CAP = 10_000
 
 
 def _utc_now() -> datetime:
@@ -98,6 +107,7 @@ class RiskEngine:
         self.on_persist_error = on_persist_error
         self.raise_on_reject = raise_on_reject
         self._clock = clock
+        self._validate_throttle_capacity()
 
         restored = state_store.load() if state_store is not None else None
         self._state = restored if restored is not None else (state or RiskState.initial())
@@ -154,6 +164,26 @@ class RiskEngine:
             )
             results = tuple(rule.evaluate(ctx) for rule in self.rules)
             decision = self._aggregate(order, results, now)
+            if (
+                decision.approved
+                and self._throttle_enabled()
+                and not (
+                    decision.order.reduce_only
+                    and self.config.reduce_only_throttle_factor is None
+                )
+            ):
+                # 节流预算只记真正放行的单(被拒的不占配额)。记录发生在聚合之后,
+                # 所以当前这笔单不影响对它自己的裁决。注意:这意味着纯 check()
+                # 调用也消耗节流预算——check 本就不是纯查询(见方法文档);
+                # 高频监控请改用 riskguard.reporting.build_digest。
+                # 完全豁免的减仓单(factor=None)不记录:它们不参与任何计数,
+                # 记了反而可能把窗口内的普通单记录挤出缓冲,让普通桶漏计(fail-open)。
+                self._state = self._state.record_order(
+                    now,
+                    decision.order.reduce_only,
+                    keep_window=_ORDER_KEEP_WINDOW,
+                    max_len=self._order_record_cap(),
+                )
             self._persist_locked()
             self._safe_audit(lambda a: a.record_decision(decision))
             return decision
@@ -218,8 +248,12 @@ class RiskEngine:
             self._persist_locked()
             return self._state
 
-    def reset_breaker(self) -> RiskState:
+    def reset_breaker(self, *, include_daily: bool = False) -> RiskState:
         """人工复盘后重置熔断,并把权益高点归位到当前权益。
+
+        默认**只清总回撤熔断**,日内亏损线不受影响——它随换日自动复位,"今天到此
+        为止就是到此为止"。传 ``include_daily=True`` 才同时清除日内熔断(并把日内
+        锚定重置到当前权益),这是留给操作者复盘后的显式覆盖,不该是默认路径。
 
         与其它状态变更方法不同,这里是**先落盘、成功后才切换内存状态**(其余方法
         是先切内存、再尽力落盘)。原因:重置是操作者据以判断"可以恢复交易"的决定
@@ -232,7 +266,10 @@ class RiskEngine:
         with self._lock:
             now = self._clock()
             was_tripped = self._state.breaker_tripped
+            was_daily_tripped = self._state.daily_tripped
             new_state = self._state.reset_breaker(now)
+            if include_daily:
+                new_state = new_state.clear_daily()
             if self.state_store is not None:
                 self.state_store.save(new_state)  # 失败则直接抛出,不切换内存状态
             self._state = new_state
@@ -240,6 +277,15 @@ class RiskEngine:
                 self._safe_audit(
                     lambda a: a.record_event(
                         "breaker_reset", now, equity=self._state.last_equity
+                    )
+                )
+            if include_daily and was_daily_tripped:
+                self._safe_audit(
+                    lambda a: a.record_event(
+                        "daily_breaker_reset",
+                        now,
+                        manual_override=True,
+                        equity=self._state.last_equity,
                     )
                 )
             return self._state
@@ -283,10 +329,97 @@ class RiskEngine:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _validate_throttle_capacity(self) -> None:
+        """拒绝大到记录缓冲装不下的节流配额(fail-closed)。
+
+        ``orders_in_window`` 数的是 ``recent_orders``,它被 ``_ORDER_HARD_CAP``
+        硬性封顶。若某个窗口内两个桶(普通 + 减仓×factor)合计的理论最大批准数
+        超过硬上限,计数永远够不到 cap,节流就**静默失效**——一个针对失控循环的
+        护栏悄悄变成空气,比没有更危险。这种配置直接拒绝构造,而不是悄悄放宽。
+        """
+        # factor=None(减仓完全豁免)时减仓单不入缓冲,容量只需覆盖普通桶。
+        factor = self.config.reduce_only_throttle_factor or 0.0
+        for cap, label in (
+            (self.config.max_orders_per_minute, "max_orders_per_minute"),
+            (self.config.max_orders_per_hour, "max_orders_per_hour"),
+        ):
+            if cap is None:
+                continue
+            required = int(cap * (1.0 + factor))
+            if required > _ORDER_HARD_CAP:
+                raise ConfigError(
+                    f"{label}={cap} with reduce_only_throttle_factor={factor} needs "
+                    f"up to {required} in-window order records, exceeding the hard "
+                    f"buffer cap {_ORDER_HARD_CAP} — the throttle could silently "
+                    "never fire. Lower the caps/factor (fail closed)."
+                )
+
+    def _throttle_enabled(self) -> bool:
+        return (
+            self.config.max_orders_per_minute is not None
+            or self.config.max_orders_per_hour is not None
+        )
+
+    def _order_record_cap(self) -> int:
+        """recent_orders 的长度上限:2 × 小时配额 × 减仓放宽倍数,再加硬兜底。
+
+        两个桶(普通/减仓)共用一条记录,因此取放宽后的减仓桶为基准再翻倍;
+        没配小时配额时按分钟配额外推(× 60)。"""
+        per_hour = self.config.max_orders_per_hour
+        if per_hour is None:
+            per_minute = self.config.max_orders_per_minute or 0
+            per_hour = per_minute * 60
+        factor = self.config.reduce_only_throttle_factor or 1.0
+        estimated = int(2 * per_hour * factor)
+        return min(max(estimated, 1_000), _ORDER_HARD_CAP)
+
     def _observe_locked(self, portfolio: Portfolio, now: datetime) -> None:
-        """在已持锁的前提下观测权益并按需触发熔断。"""
+        """在已持锁的前提下观测权益并按需触发熔断(总回撤线 + 日内亏损线)。"""
+        # ---- 交易日会话:换日重锚定 + 日内熔断自动复位 ----
+        # 非有限权益不用于锚定(镜像 observe_equity 的坏 tick 防御):跳过换日,
+        # 等下一个有效读数再锚——绝不能让一个 NaN 定义"今天的基准"。
+        if math.isfinite(portfolio.equity):
+            session_key = session_key_for(now, self.config.session_boundary_utc)
+            if self._state.session_date != session_key:
+                was_daily_tripped = self._state.daily_tripped
+                self._state = self._state.roll_session(session_key, portfolio.equity)
+                if was_daily_tripped:
+                    self._safe_audit(
+                        lambda a: a.record_event(
+                            "daily_breaker_reset",
+                            now,
+                            session=session_key,
+                            anchor_equity=portfolio.equity,
+                        )
+                    )
+
         was_tripped = self._state.breaker_tripped
         new_state = self._state.observe_equity(portfolio.equity, now)
+
+        # ---- 日内亏损线 ----
+        daily_limit = self.config.max_daily_loss_pct
+        if (
+            daily_limit is not None
+            and not new_state.daily_tripped
+            and new_state.session_anchor_equity > 0
+            and new_state.daily_loss >= daily_limit
+        ):
+            daily_reason = (
+                f"daily loss {new_state.daily_loss:.2%} >= limit {daily_limit:.2%} "
+                f"(session {new_state.session_date}, anchor "
+                f"{new_state.session_anchor_equity:.2f})"
+            )
+            new_state = new_state.trip_daily(daily_reason, now)
+            self._safe_audit(
+                lambda a: a.record_event(
+                    "daily_breaker_trip",
+                    now,
+                    reason=daily_reason,
+                    equity=new_state.last_equity,
+                    session_anchor_equity=new_state.session_anchor_equity,
+                    daily_loss=new_state.daily_loss,
+                )
+            )
         if (
             not new_state.breaker_tripped
             and new_state.high_water_mark > 0

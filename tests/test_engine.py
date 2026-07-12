@@ -693,14 +693,18 @@ def test_no_auto_register_by_default():
 
 def test_engine_builds_default_rules_when_none_given():
     eng = RiskEngine(RiskConfig(), clock=_list_clock()[1])
-    # drawdown / position / quarantine / gross / net
+    # drawdown / daily loss / position / quarantine / gross / net / band / throttle
+    # (AI 代理闸门三件套在默认配置下是空操作,但始终在栈里)
     names = {r.name for r in eng.rules}
     assert names == {
         "drawdown_circuit_breaker",
+        "daily_loss_limit",
         "max_position_limit",
         "strategy_quarantine",
         "gross_exposure_limit",
         "net_exposure_limit",
+        "price_band",
+        "order_throttle",
     }
 
 
