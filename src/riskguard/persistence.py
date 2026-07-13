@@ -187,6 +187,13 @@ class SqliteStateStore(StateStore):
             self._conn.close()
 
 
+#: 当前存档格式版本。v1(无 ``schema`` 键)= 1.4 及更早;v2 增加 AI 代理闸门字段
+#: (会话锚定/日内熔断/最近订单)。读取端对**更高**的版本 fail-closed 拒读。
+#: 已知限制(无廉价解法):旧版本代码读 v2 存档会成功(多余键被忽略),但随后
+#: 保存时会静默丢弃新字段——降级部署前请自行备份存档。
+_SCHEMA_VERSION = 2
+
+
 def _serialize(state: RiskState) -> str:
     if not math.isfinite(state.high_water_mark) or not math.isfinite(state.last_equity):
         # 绝不把 NaN/±inf 写出去:json.dumps 会吐出非标准的 NaN/Infinity 字面量,
@@ -196,8 +203,15 @@ def _serialize(state: RiskState) -> str:
             f"refusing to persist non-finite equity "
             f"(high_water_mark={state.high_water_mark!r}, last_equity={state.last_equity!r})"
         )
+    if not math.isfinite(state.session_anchor_equity):
+        # 同理:非有限的锚定值会让 daily_loss 的判断永久失真。
+        raise PersistenceError(
+            "refusing to persist non-finite session anchor "
+            f"(session_anchor_equity={state.session_anchor_equity!r})"
+        )
     return json.dumps(
         {
+            "schema": _SCHEMA_VERSION,
             "high_water_mark": state.high_water_mark,
             "last_equity": state.last_equity,
             "breaker_tripped": state.breaker_tripped,
@@ -206,6 +220,16 @@ def _serialize(state: RiskState) -> str:
             "strategy_inception": {
                 k: v.isoformat() for k, v in state.strategy_inception.items()
             },
+            "session_date": state.session_date,
+            "session_anchor_equity": state.session_anchor_equity,
+            "daily_tripped": state.daily_tripped,
+            "daily_tripped_at": (
+                state.daily_tripped_at.isoformat() if state.daily_tripped_at else None
+            ),
+            "daily_trip_reason": state.daily_trip_reason,
+            "recent_orders": [
+                [ts.isoformat(), reduce_only] for ts, reduce_only in state.recent_orders
+            ],
         }
     )
 
@@ -217,6 +241,14 @@ def _deserialize(payload: str) -> RiskState:
     无法区分。"""
     try:
         data = json.loads(payload)
+        schema = int(data.get("schema", 1))
+        if schema > _SCHEMA_VERSION:
+            # 未来版本的存档:半懂不懂地读进来比读不到更危险(可能丢掉新版本
+            # 才有的熔断语义)。fail-closed,让操作者用对应版本的代码来读。
+            raise ValueError(
+                f"state archive written by a newer riskguard (schema {schema} > "
+                f"{_SCHEMA_VERSION}); refusing to half-read it"
+            )
         hwm = float(data["high_water_mark"])
         last_equity = float(data["last_equity"])
         if not math.isfinite(hwm) or not math.isfinite(last_equity):
@@ -224,6 +256,15 @@ def _deserialize(payload: str) -> RiskState:
                 f"non-finite equity in persisted state (hwm={hwm!r}, "
                 f"last_equity={last_equity!r}) — drawdown would never trip again"
             )
+        # v2 新字段一律 .get() 带默认值:v1 存档(schema 键都没有)直接可读,
+        # 这就是全部的迁移逻辑。
+        anchor = float(data.get("session_anchor_equity", 0.0))
+        if not math.isfinite(anchor):
+            raise ValueError(
+                f"non-finite session anchor in persisted state ({anchor!r}) — "
+                "daily loss line would be permanently broken"
+            )
+        daily_tripped_at = data.get("daily_tripped_at")
         return RiskState(
             high_water_mark=hwm,
             last_equity=last_equity,
@@ -238,6 +279,17 @@ def _deserialize(payload: str) -> RiskState:
                 k: datetime.fromisoformat(v)
                 for k, v in data["strategy_inception"].items()
             },
+            session_date=data.get("session_date"),
+            session_anchor_equity=anchor,
+            daily_tripped=bool(data.get("daily_tripped", False)),
+            daily_tripped_at=(
+                datetime.fromisoformat(daily_tripped_at) if daily_tripped_at else None
+            ),
+            daily_trip_reason=data.get("daily_trip_reason", ""),
+            recent_orders=tuple(
+                (datetime.fromisoformat(ts), bool(reduce_only))
+                for ts, reduce_only in data.get("recent_orders", [])
+            ),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise PersistenceError(

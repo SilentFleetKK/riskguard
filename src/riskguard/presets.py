@@ -13,6 +13,10 @@
 | 总敞口上限(组合层天花板) | 1.0× | 1.0× | 1.5× |
 | 净敞口上限(方向性) | 1.0× | 1.0× | 1.5× |
 | Kelly 系数 | 0.25 | 0.50 | 0.50 |
+| 日内亏损线 | 2% | 3% | 5% |
+| fat-finger 价格带 | ±5% | ±10% | ±15% |
+| 每分钟订单上限 | 6 | 10 | 30 |
+| 每小时订单上限 | 60 | 120 | 360 |
 
 说明:``max_gross_exposure_pct`` / ``max_net_exposure_pct`` 是**组合层天花板**,约束的是
 多个头寸叠加后的总/净敞口;内置 sizer 给单个标的下注时仍受 ``max_position_pct`` 约束,
@@ -39,6 +43,10 @@ CONSERVATIVE = RiskConfig(
     quarantine_max_position_pct=0.005,
     kelly_fraction=0.25,
     vol_target_annual=0.10,
+    max_daily_loss_pct=0.02,
+    max_price_band_pct=0.05,
+    max_orders_per_minute=6,
+    max_orders_per_hour=60,
 )
 
 #: 均衡档:对齐文章"新手三条铁律"(单笔 10% / 回撤 15% / 半 Kelly),并加了净敞口护栏。
@@ -51,6 +59,10 @@ BALANCED = RiskConfig(
     quarantine_max_position_pct=0.01,
     kelly_fraction=0.50,
     vol_target_annual=0.15,
+    max_daily_loss_pct=0.03,
+    max_price_band_pct=0.10,
+    max_orders_per_minute=10,
+    max_orders_per_hour=120,
 )
 
 #: 激进档:更大单笔与敞口、允许组合层适度加杠杆;回撤容忍度更高,但净敞口仍设上限。
@@ -63,6 +75,10 @@ AGGRESSIVE = RiskConfig(
     quarantine_max_position_pct=0.02,
     kelly_fraction=0.50,
     vol_target_annual=0.25,
+    max_daily_loss_pct=0.05,
+    max_price_band_pct=0.15,
+    max_orders_per_minute=30,
+    max_orders_per_hour=360,
 )
 
 #: 预设名 → 配置。名字大小写不敏感。

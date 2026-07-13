@@ -526,3 +526,70 @@ def test_tighter_drawdown_config_trips_earlier(tmp_path):
     broker2.set_marks({"AAPL": 100.0})
     state2 = engine2.update_equity(broker2.get_portfolio())
     assert state2.breaker_tripped is False
+
+
+# --------------------------------------------------------------------------- #
+# 端到端:一个失控的 AI 代理撞上闸门三件套(balanced 预设)
+# --------------------------------------------------------------------------- #
+def test_runaway_ai_agent_hits_throttle_then_daily_line(tmp_path):
+    """剧情:AI 代理先高频刷单撞节流;行情下挫触发日内亏损线;错价限价单撞
+    价格保护带;全程平仓单放行——三件套 + 既有防线协同工作,审计链完好。"""
+    from riskguard import get_preset
+
+    box, clock = _list_clock()
+    broker = _new_broker()
+    audit = JsonlAuditSink(_audit_path(tmp_path))
+    engine = RiskEngine(get_preset("balanced"), broker=broker, audit=audit, clock=clock)
+
+    # --- 第一幕:失控循环刷单,第 11 单撞节流(balanced:10 单/分钟) ---
+    approvals = rejections = 0
+    for i in range(12):
+        box[0] = T0 + timedelta(seconds=i)
+        decision = engine.check(
+            Order("AAPL", Side.BUY, 1.0), broker.get_portfolio()
+        )
+        if decision.approved:
+            approvals += 1
+        else:
+            rejections += 1
+            assert any(
+                r.rule == "order_throttle" and not r.passed for r in decision.results
+            )
+    assert approvals == 10
+    assert rejections == 2
+
+    # --- 第二幕:行情下挫 3.5%,日内亏损线(3%)拉闸 ---
+    box[0] = T0 + timedelta(minutes=5)
+    broker.set_marks({"AAPL": 193.0, "MSFT": 386.0})  # 全场 -3.5%
+    # 引擎需要观测到新权益:AI 还没持仓,直接压低现金外权益没意义——
+    # 用一个显式的权益快照驱动(镜像监控线程的调用方式)
+    from riskguard import Account, Portfolio
+
+    engine.update_equity(Portfolio(Account(equity=96_500.0, cash=96_500.0)))
+    assert engine.state.daily_tripped
+
+    box[0] = T0 + timedelta(minutes=6)
+    d_new = engine.check(Order("MSFT", Side.BUY, 1.0), broker.get_portfolio())
+    assert d_new.rejected
+    assert any(r.rule == "daily_loss_limit" and not r.passed for r in d_new.results)
+
+    # --- 第三幕:错价限价单撞价格带(±10%),即便日内线之外也拦得住 ---
+    box[0] = T0 + timedelta(minutes=7)
+    fat_finger = Order(
+        "AAPL", Side.SELL, 1.0, order_type="limit", limit_price=100.0, reduce_only=False
+    )
+    d_fat = engine.check(fat_finger, broker.get_portfolio())
+    assert any(r.rule == "price_band" and not r.passed for r in d_fat.results)
+
+    # --- 第四幕:平仓单永远放行(风险要能收敛) ---
+    box[0] = T0 + timedelta(minutes=8)
+    d_close = engine.check(
+        Order("AAPL", Side.SELL, 1.0, reduce_only=True), broker.get_portfolio()
+    )
+    assert d_close.approved
+
+    # --- 尾声:审计链完好,三类事件都有案底 ---
+    audit.close()
+    types = _event_types(_audit_path(tmp_path))
+    assert "daily_breaker_trip" in types
+    assert JsonlAuditSink.verify(_audit_path(tmp_path))

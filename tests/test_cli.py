@@ -304,3 +304,141 @@ def test_position_spec_multiple_positions_parsed():
                  "--position", "TSLA:-20:250",
                  "--position", "MSFT:30:300"])
     assert code == 0
+
+
+# --------------------------------------------------------------------------- #
+# AI 代理闸门:--limit-price(价格保护带)
+# --------------------------------------------------------------------------- #
+def test_check_limit_price_within_band_passes(capsys):
+    code = main(
+        ["check", "--preset", "balanced", "--equity", "100000",
+         "--side", "buy", "--qty", "10", "--price", "200", "--limit-price", "205"]
+    )
+    assert code == 0
+
+
+def test_check_limit_price_outside_band_rejected(capsys):
+    """balanced 档价格带 ±10%:限价 300 偏离 mark 200 达 50%,拒。"""
+    code = main(
+        ["check", "--preset", "balanced", "--equity", "100000",
+         "--side", "buy", "--qty", "10", "--price", "200", "--limit-price", "300"]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "band" in out
+
+
+def test_check_limit_price_must_be_positive():
+    with pytest.raises(SystemExit) as exc:
+        main(["check", "--preset", "balanced", "--equity", "100000",
+              "--side", "buy", "--qty", "10", "--price", "200", "--limit-price", "-5"])
+    assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# reset-breaker:人工复位的唯一 CLI 路径
+# --------------------------------------------------------------------------- #
+def _trip_breaker_via_cli(tmp_path) -> str:
+    """用两次 digest 打穿 conservative 档的 10% 回撤线,返回 state db 路径。"""
+    db = str(tmp_path / "state.db")
+    assert main(["digest", "--preset", "conservative", "--equity", "100000",
+                 "--state-db", db]) == 0
+    assert main(["digest", "--preset", "conservative", "--equity", "85000",
+                 "--state-db", db]) == 1
+    return db
+
+
+def test_reset_breaker_resets_with_yes(tmp_path, capsys):
+    """打穿 conservative 总线(15% 回撤 > 10% 线)时日内线(2%)必然同时触发。
+    普通复位只清总线——分层防护:日内线继续拦新仓,直到换日或 --include-daily。"""
+    db = _trip_breaker_via_cli(tmp_path)
+    code = main(["reset-breaker", "--state-db", db, "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "已复位" in out
+    # 总线已清:再复位一次已无事可做
+    assert main(["reset-breaker", "--state-db", db, "--yes"]) == 1
+    # 但日内线仍然拦着新仓(总线复位不解日内线)
+    assert main(["check", "--preset", "conservative", "--equity", "85000",
+                 "--side", "buy", "--qty", "1", "--price", "100",
+                 "--state-db", db]) == 1
+    # 人工显式覆盖日内线后,新单放行(日内锚定重置到当前权益)
+    assert main(["reset-breaker", "--state-db", db, "--yes", "--include-daily"]) == 0
+    assert main(["check", "--preset", "conservative", "--equity", "85000",
+                 "--side", "buy", "--qty", "1", "--price", "100",
+                 "--state-db", db]) == 0
+
+
+def test_reset_breaker_nothing_tripped_returns_one(tmp_path, capsys):
+    db = str(tmp_path / "state.db")
+    assert main(["digest", "--preset", "balanced", "--equity", "100000",
+                 "--state-db", db]) == 0
+    code = main(["reset-breaker", "--state-db", db, "--yes"])
+    assert code == 1
+
+
+def test_reset_breaker_prints_trip_reason_before_reset(tmp_path, capsys):
+    db = _trip_breaker_via_cli(tmp_path)
+    main(["reset-breaker", "--state-db", db, "--yes"])
+    out = capsys.readouterr().out
+    assert "drawdown" in out  # 复盘时必须看得到当初为什么熔断
+
+
+def test_reset_breaker_requires_confirmation_without_yes(tmp_path, monkeypatch, capsys):
+    """非 --yes 时读 stdin 确认;输入 n 则不复位。"""
+    db = _trip_breaker_via_cli(tmp_path)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO("n\n"))
+    code = main(["reset-breaker", "--state-db", db])
+    assert code == 1
+    # 熔断仍在
+    assert main(["check", "--preset", "conservative", "--equity", "85000",
+                 "--side", "buy", "--qty", "1", "--price", "100",
+                 "--state-db", db]) == 1
+
+
+def test_reset_breaker_include_daily_clears_daily_line(tmp_path, capsys):
+    """--include-daily:人工显式覆盖日内熔断(默认只清总线)。"""
+    db = str(tmp_path / "state.db")
+    # balanced 日内线 3%:两次 digest 打穿它(但不打穿 15% 总线)
+    assert main(["digest", "--preset", "balanced", "--equity", "100000",
+                 "--state-db", db]) == 0
+    code = main(["digest", "--preset", "balanced", "--equity", "96000",
+                 "--state-db", db])
+    assert code == 4  # 仅日内熔断激活 → 退出码 4
+    # 总线没触发:普通复位无事可做;日内线还在,新仓仍被拒
+    assert main(["reset-breaker", "--state-db", db, "--yes"]) == 1
+    assert main(["check", "--preset", "balanced", "--equity", "96000",
+                 "--side", "buy", "--qty", "1", "--price", "100",
+                 "--state-db", db]) == 1
+    # --include-daily 后放行
+    assert main(["reset-breaker", "--state-db", db, "--yes", "--include-daily"]) == 0
+    assert main(["check", "--preset", "balanced", "--equity", "96000",
+                 "--side", "buy", "--qty", "1", "--price", "100",
+                 "--state-db", db]) == 0
+
+
+def test_reset_breaker_missing_db_errors(tmp_path, capsys):
+    code = main(["reset-breaker", "--state-db", str(tmp_path / "nope.db"), "--yes"])
+    assert code == 2
+
+
+# --------------------------------------------------------------------------- #
+# digest:日内熔断也算"熔断激活"(退出码 1)
+# --------------------------------------------------------------------------- #
+def test_digest_exit_four_on_daily_trip(tmp_path, capsys):
+    db = str(tmp_path / "state.db")
+    assert main(["digest", "--preset", "balanced", "--equity", "100000",
+                 "--state-db", db]) == 0
+    code = main(["digest", "--preset", "balanced", "--equity", "96000",
+                 "--state-db", db])
+    out = capsys.readouterr().out
+    assert code == 4  # 仅日内线激活 → 专属退出码 4(1 仍专指总回撤熔断)
+    assert "日内" in out
+
+
+def test_presets_table_shows_ai_gate_rows(capsys):
+    main(["presets"])
+    out = capsys.readouterr().out
+    assert "日内亏损线" in out
+    assert "价格带" in out
+    assert "分钟" in out

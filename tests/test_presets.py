@@ -62,3 +62,32 @@ def test_balanced_equals_library_defaults():
 def test_quarantine_cap_within_position_cap():
     for cfg in PRESETS.values():
         assert cfg.quarantine_max_position_pct <= cfg.max_position_pct
+
+
+# ---------------------------------------------------------------------------
+# AI 代理闸门三件套:预设中默认开启,且三档单调
+# ---------------------------------------------------------------------------
+def test_ai_gate_enabled_in_all_presets():
+    """默认 RiskConfig() 里三件套关着;预设是它们"开箱即开"的地方。"""
+    for name in ("conservative", "balanced", "aggressive"):
+        cfg = get_preset(name)
+        assert cfg.max_daily_loss_pct is not None
+        assert cfg.max_price_band_pct is not None
+        assert cfg.max_orders_per_minute is not None
+        assert cfg.max_orders_per_hour is not None
+
+
+def test_ai_gate_values_monotone_across_tiers():
+    c, b, a = (get_preset(n) for n in ("conservative", "balanced", "aggressive"))
+    assert c.max_daily_loss_pct <= b.max_daily_loss_pct <= a.max_daily_loss_pct
+    assert c.max_price_band_pct <= b.max_price_band_pct <= a.max_price_band_pct
+    assert c.max_orders_per_minute <= b.max_orders_per_minute <= a.max_orders_per_minute
+    assert c.max_orders_per_hour <= b.max_orders_per_hour <= a.max_orders_per_hour
+
+
+def test_balanced_ai_gate_values():
+    b = get_preset("balanced")
+    assert b.max_daily_loss_pct == 0.03
+    assert b.max_price_band_pct == 0.10
+    assert b.max_orders_per_minute == 10
+    assert b.max_orders_per_hour == 120

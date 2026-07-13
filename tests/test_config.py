@@ -459,3 +459,80 @@ def test_fully_custom_valid_config():
     assert cfg.auto_register_strategies is True
     assert cfg.max_net_exposure_pct == 1.0
     assert cfg.trading_days_per_year == 250
+
+
+# ---------------------------------------------------------------------------
+# AI 代理闸门三件套(日内亏损线 / 价格保护带 / 下单节流)
+# ---------------------------------------------------------------------------
+def test_ai_gate_fields_default_off():
+    """三件套默认全关(None),保证 v1.4 行为不变;由预设开启。"""
+    cfg = RiskConfig()
+    assert cfg.max_daily_loss_pct is None
+    assert cfg.session_boundary_utc == "00:00"
+    assert cfg.max_price_band_pct is None
+    assert cfg.max_orders_per_minute is None
+    assert cfg.max_orders_per_hour is None
+    assert cfg.reduce_only_throttle_factor is None  # None = 减仓完全豁免节流
+
+
+def test_max_daily_loss_pct_bounds():
+    assert RiskConfig(max_daily_loss_pct=0.03).max_daily_loss_pct == 0.03
+    assert RiskConfig(max_daily_loss_pct=0.15).max_daily_loss_pct == 0.15  # == max_drawdown_pct
+    with pytest.raises(ConfigError):
+        RiskConfig(max_daily_loss_pct=0.0)
+    with pytest.raises(ConfigError):
+        RiskConfig(max_daily_loss_pct=-0.05)
+    with pytest.raises(ConfigError):
+        RiskConfig(max_daily_loss_pct=1.5)
+
+
+def test_max_daily_loss_pct_must_not_exceed_max_drawdown_pct():
+    """日内线必须比总回撤线紧(镜像隔离仓位 vs 单笔仓位的既有先例)。"""
+    with pytest.raises(ConfigError):
+        RiskConfig(max_daily_loss_pct=0.20, max_drawdown_pct=0.15)
+    # 一同调大总线则合法
+    cfg = RiskConfig(max_daily_loss_pct=0.20, max_drawdown_pct=0.30)
+    assert cfg.max_daily_loss_pct == 0.20
+
+
+@pytest.mark.parametrize("bad", ["24:00", "12:60", "9:00", "0900", "aa:bb", "", "12:00:00"])
+def test_session_boundary_utc_rejects_malformed(bad):
+    with pytest.raises(ConfigError):
+        RiskConfig(session_boundary_utc=bad)
+
+
+@pytest.mark.parametrize("good", ["00:00", "17:00", "23:59", "09:30"])
+def test_session_boundary_utc_accepts_hh_mm(good):
+    assert RiskConfig(session_boundary_utc=good).session_boundary_utc == good
+
+
+def test_max_price_band_pct_bounds():
+    assert RiskConfig(max_price_band_pct=0.10).max_price_band_pct == 0.10
+    with pytest.raises(ConfigError):
+        RiskConfig(max_price_band_pct=0.0)
+    with pytest.raises(ConfigError):
+        RiskConfig(max_price_band_pct=1.5)
+
+
+@pytest.mark.parametrize("field", ["max_orders_per_minute", "max_orders_per_hour"])
+def test_throttle_caps_must_be_positive_ints(field):
+    assert getattr(RiskConfig(**{field: 10}), field) == 10
+    with pytest.raises(ConfigError):
+        RiskConfig(**{field: 0})
+    with pytest.raises(ConfigError):
+        RiskConfig(**{field: -3})
+
+
+def test_throttle_hour_cap_must_cover_minute_cap():
+    """两者都设时 hour >= minute,否则分钟配额永远用不满,必是配置笔误。"""
+    with pytest.raises(ConfigError):
+        RiskConfig(max_orders_per_minute=10, max_orders_per_hour=5)
+    cfg = RiskConfig(max_orders_per_minute=10, max_orders_per_hour=10)
+    assert cfg.max_orders_per_hour == 10
+
+
+def test_reduce_only_throttle_factor_bounds():
+    assert RiskConfig(reduce_only_throttle_factor=1.0).reduce_only_throttle_factor == 1.0
+    assert RiskConfig(reduce_only_throttle_factor=None).reduce_only_throttle_factor is None
+    with pytest.raises(ConfigError):
+        RiskConfig(reduce_only_throttle_factor=0.5)
